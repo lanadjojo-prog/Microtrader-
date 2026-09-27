@@ -1,0 +1,68 @@
+import os
+from dataclasses import dataclass
+from typing import List
+
+
+def _bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int(name: str, default: int) -> int:
+    return int(os.getenv(name, str(default)))
+
+
+def _float(name: str, default: float) -> float:
+    return float(os.getenv(name, str(default)))
+
+
+@dataclass(frozen=True)
+class Settings:
+    api_key: str = os.getenv("ALPACA_API_KEY", "")
+    api_secret: str = os.getenv("ALPACA_API_SECRET", "")
+    paper: bool = _bool("ALPACA_PAPER", True)
+    live_trading_enabled: bool = _bool("LIVE_TRADING_ENABLED", False)
+    auto_start: bool = _bool("AUTO_START", False)
+    dashboard_token: str = os.getenv("DASHBOARD_TOKEN", "")
+
+    symbols_raw: str = os.getenv(
+        "SYMBOLS",
+        "SPY,QQQ,AAPL,MSFT,NVDA,AMD,AMZN,META,GOOGL,TSLA"
+    )
+    poll_seconds: int = _int("POLL_SECONDS", 20)
+    bars_lookback: int = _int("BARS_LOOKBACK", 30)
+    fast_window: int = _int("FAST_WINDOW", 4)
+    slow_window: int = _int("SLOW_WINDOW", 12)
+    entry_edge_bps: float = _float("ENTRY_EDGE_BPS", 8.0)
+    exit_edge_bps: float = _float("EXIT_EDGE_BPS", 1.0)
+
+    trade_notional: float = _float("TRADE_NOTIONAL", 3.0)
+    max_open_positions: int = _int("MAX_OPEN_POSITIONS", 5)
+    max_trades_per_day: int = _int("MAX_TRADES_PER_DAY", 100)
+    max_daily_loss: float = _float("MAX_DAILY_LOSS", 5.0)
+    take_profit_pct: float = _float("TAKE_PROFIT_PCT", 0.004)
+    stop_loss_pct: float = _float("STOP_LOSS_PCT", 0.003)
+    cooldown_seconds: int = _int("COOLDOWN_SECONDS", 60)
+    kill_close_positions: bool = _bool("KILL_CLOSE_POSITIONS", True)
+
+    data_feed: str = os.getenv("ALPACA_DATA_FEED", "iex")
+
+    @property
+    def symbols(self) -> List[str]:
+        return [s.strip().upper() for s in self.symbols_raw.split(",") if s.strip()]
+
+    @property
+    def trading_base_url(self) -> str:
+        return "https://paper-api.alpaca.markets" if self.paper else "https://api.alpaca.markets"
+
+    @property
+    def data_base_url(self) -> str:
+        return "https://data.alpaca.markets"
+
+    @property
+    def can_trade(self) -> bool:
+        if self.paper:
+            return True
+        return self.live_trading_enabled
+
+
+settings = Settings()
