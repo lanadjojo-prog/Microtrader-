@@ -64,12 +64,14 @@ class TradingEngine:
         self.state.kill_reason = reason
         self.state.running = False
         log.error("KILL SWITCH: %s", reason)
-        if self.settings.kill_close_positions:
+        if self.settings.kill_close_positions and self.settings.can_trade:
             try:
                 await self.client.cancel_all_orders()
                 await self.client.close_all_positions()
             except Exception as exc:
                 log.exception("Failed to flatten account during kill switch: %s", exc)
+        elif self.settings.kill_close_positions:
+            log.warning("KILL SWITCH flatten blocked by live safety lock")
 
     async def _loop(self):
         while self.state.running:
