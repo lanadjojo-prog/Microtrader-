@@ -66,6 +66,9 @@ class Settings:
     lab_min_positive_symbol_ratio: float = _float("LAB_MIN_POSITIVE_SYMBOL_RATIO", 0.60)
     research_auto_start: bool = _bool("RESEARCH_AUTO_START", True)
     research_interval_seconds: int = _int("RESEARCH_INTERVAL_SECONDS", 21600)
+    research_agent_auto_start: bool = _bool("RESEARCH_AGENT_AUTO_START", True)
+    research_agent_interval_seconds: int = _int("RESEARCH_AGENT_INTERVAL_SECONDS", 60)
+    research_agent_focus_families: int = _int("RESEARCH_AGENT_FOCUS_FAMILIES", 4)
 
     # Crypto / microstructure lab (public Bitvavo data, simulation-only)
     crypto_lab_auto_start: bool = _bool("CRYPTO_LAB_AUTO_START", False)
