@@ -241,11 +241,11 @@ class ResearchAgent:
         self.state.last_decision = decision
         self.state.message = decision.get("reason", "Research priorities updated")
 
-    async def _init_store(self):
+    def _init_store_sync(self):
         if not self.settings.database_url:
             return
-        async with await psycopg.AsyncConnection.connect(self.settings.database_url) as conn:
-            await conn.execute("""
+        with psycopg.connect(self.settings.database_url, connect_timeout=5) as conn:
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_agent_decisions (
                     id BIGSERIAL PRIMARY KEY,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -253,21 +253,34 @@ class ResearchAgent:
                     hypotheses JSONB NOT NULL
                 )
             """)
-            await conn.commit()
+            conn.commit()
+
+    async def _init_store(self):
+        if not self.settings.database_url:
+            return
+        await asyncio.wait_for(asyncio.to_thread(self._init_store_sync), timeout=8.0)
+
+    def _persist_decision_sync(self, decision: dict, hypotheses: list[dict]):
+        if not self.settings.database_url:
+            return
+        with psycopg.connect(self.settings.database_url, connect_timeout=5) as conn:
+            conn.execute(
+                """
+                INSERT INTO microtrader_agent_decisions (decision, hypotheses)
+                VALUES (%s::jsonb, %s::jsonb)
+                """,
+                (json.dumps(decision), json.dumps(hypotheses)),
+            )
+            conn.commit()
 
     async def _persist_decision(self, decision: dict, hypotheses: list[dict]):
         if not self.settings.database_url:
             return
         try:
-            async with await psycopg.AsyncConnection.connect(self.settings.database_url) as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO microtrader_agent_decisions (decision, hypotheses)
-                    VALUES (%s::jsonb, %s::jsonb)
-                    """,
-                    (json.dumps(decision), json.dumps(hypotheses)),
-                )
-                await conn.commit()
+            await asyncio.wait_for(
+                asyncio.to_thread(self._persist_decision_sync, decision, hypotheses),
+                timeout=8.0,
+            )
         except Exception as exc:
             log.warning("Could not persist research-agent decision: %s", exc)
 
