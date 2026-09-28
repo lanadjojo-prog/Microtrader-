@@ -28,6 +28,10 @@ class LabState:
     message: str = "Not started"
     symbols_loaded: int = 0
     symbols_total: int = 0
+    generation: int = 0
+    tested_total: int = 0
+    promoted_total: int = 0
+    target_promoted: int = 0
 
 
 class StrategyLab:
@@ -56,6 +60,7 @@ class StrategyLab:
             stage="starting",
             message="Preparing Strategy Lab",
             symbols_total=len(self.settings.lab_symbols),
+            target_promoted=self.settings.lab_target_promoted,
         )
         self._results = []
         self._summary = {}
@@ -90,50 +95,104 @@ class StrategyLab:
                 if len(bars) >= 100:
                     bars_by_symbol[symbol] = bars
                 self.state.symbols_loaded += 1
+                await asyncio.sleep(0)
 
-            candidates = candidate_grid()
-            self.state.total = len(candidates)
-            self.state.stage = "testing"
-            self.state.message = f"Testing {len(candidates)} strategy candidates"
             if not bars_by_symbol:
                 raise RuntimeError("No usable historical bars returned for Strategy Lab")
 
+            stream = candidate_stream()
+            seen = set()
             results: List[dict] = []
-            for idx, candidate in enumerate(candidates, start=1):
-                result = evaluate_candidate(
-                    candidate,
-                    bars_by_symbol,
-                    cost_bps=self.settings.lab_cost_bps,
-                    stress_cost_multiplier=self.settings.lab_stress_cost_multiplier,
-                    min_oos_trades=self.settings.lab_min_oos_trades,
-                )
-                results.append(result)
-                self.state.progress = idx
-                self.state.message = f"Tested {idx}/{len(candidates)} candidates"
-                await asyncio.sleep(0)
+            promoted: List[dict] = []
+            batch_size = max(1, self.settings.lab_batch_size)
 
-            results.sort(
-                key=lambda row: (
-                    bool(row["promoted"]),
-                    row["oos"]["expectancy_bps"],
-                    row["oos"]["profit_factor"],
-                ),
-                reverse=True,
-            )
-            self._results = results
-            promoted = [r for r in results if r["promoted"]]
-            self.state.stage = "completed"
-            self.state.message = "Strategy Lab completed"
-            self._summary = {
-                "symbols": list(bars_by_symbol.keys()),
-                "bars": {s: len(v) for s, v in bars_by_symbol.items()},
-                "candidates_tested": len(results),
-                "promoted_count": len(promoted),
-                "best_candidate": promoted[0] if promoted else None,
-                "cost_bps_per_side": self.settings.lab_cost_bps,
-                "stress_cost_multiplier": self.settings.lab_stress_cost_multiplier,
-                "method": "chronological 70/30 holdout; next-bar-open fills; long-only; no overlapping position per symbol",
-            }
+            self.state.stage = "testing"
+            self.state.total = batch_size
+
+            while self.state.running:
+                self.state.generation += 1
+                self.state.progress = 0
+                self.state.total = batch_size
+                self.state.message = (
+                    f"Generation {self.state.generation}: testing next {batch_size} candidates"
+                )
+
+                batch: List[Candidate] = []
+                while len(batch) < batch_size:
+                    candidate = next(stream)
+                    signature = (candidate.strategy, tuple(sorted(candidate.params.items())))
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    batch.append(candidate)
+
+                for idx, candidate in enumerate(batch, start=1):
+                    result = evaluate_candidate(
+                        candidate,
+                        bars_by_symbol,
+                        cost_bps=self.settings.lab_cost_bps,
+                        stress_cost_multiplier=self.settings.lab_stress_cost_multiplier,
+                        min_oos_trades=self.settings.lab_min_oos_trades,
+                        min_profit_factor=self.settings.lab_min_profit_factor,
+                        max_drawdown_pct=self.settings.lab_max_drawdown_pct,
+                        min_positive_symbol_ratio=self.settings.lab_min_positive_symbol_ratio,
+                    )
+                    results.append(result)
+                    if result["promoted"]:
+                        promoted.append(result)
+
+                    self.state.progress = idx
+                    self.state.tested_total += 1
+                    self.state.promoted_total = len(promoted)
+                    self.state.message = (
+                        f"Generation {self.state.generation}: {idx}/{batch_size} tested · "
+                        f"{len(promoted)}/{self.settings.lab_target_promoted} promoted"
+                    )
+
+                    results.sort(
+                        key=lambda row: (
+                            bool(row["promoted"]),
+                            row["oos"]["expectancy_bps"],
+                            row["oos"]["profit_factor"],
+                        ),
+                        reverse=True,
+                    )
+                    self._results = results[:250]
+                    self._summary = {
+                        "symbols": list(bars_by_symbol.keys()),
+                        "bars": {s: len(v) for s, v in bars_by_symbol.items()},
+                        "candidates_tested": self.state.tested_total,
+                        "promoted_count": len(promoted),
+                        "target_promoted": self.settings.lab_target_promoted,
+                        "generation": self.state.generation,
+                        "best_candidate": promoted[0] if promoted else (results[0] if results else None),
+                        "cost_bps_per_side": self.settings.lab_cost_bps,
+                        "stress_cost_multiplier": self.settings.lab_stress_cost_multiplier,
+                        "method": (
+                            "continuous deterministic candidate search; chronological 70/30 holdout; "
+                            "next-bar-open fills; long-only; per-symbol robustness filter"
+                        ),
+                    }
+                    await asyncio.sleep(0)
+
+                    if (
+                        self.settings.lab_target_promoted > 0
+                        and len(promoted) >= self.settings.lab_target_promoted
+                    ):
+                        self.state.stage = "target_reached"
+                        self.state.message = (
+                            f"Target reached: {len(promoted)} robust candidates found after "
+                            f"{self.state.tested_total} tests"
+                        )
+                        return
+
+                if not self.settings.lab_continuous:
+                    self.state.stage = "completed"
+                    self.state.message = (
+                        f"Batch completed: {self.state.tested_total} candidates tested"
+                    )
+                    return
+
         except asyncio.CancelledError:
             self.state.stage = "stopped"
             self.state.message = "Strategy Lab stopped"
@@ -145,6 +204,44 @@ class StrategyLab:
         finally:
             self.state.running = False
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
+
+
+def candidate_stream():
+    """Yield an open-ended, deterministic stream of unique parameter combinations."""
+    generation = 0
+    while True:
+        generation += 1
+
+        # Momentum: gradually widen the search instead of random data-mining.
+        slow_values = [10 + generation, 14 + generation * 2, 20 + generation * 3, 30 + generation * 4]
+        for slow in slow_values:
+            fast_values = sorted({2, 3, 4, 5, max(2, slow // 4), max(2, slow // 3)})
+            for fast in fast_values:
+                if fast >= slow:
+                    continue
+                for entry_bps in (3.0, 5.0, 8.0, 12.0, 18.0, 25.0):
+                    for hold in (6, 12, 18, 24, 36, 48):
+                        yield Candidate("momentum", {
+                            "fast": fast,
+                            "slow": slow,
+                            "entry_bps": entry_bps,
+                            "max_hold": hold,
+                        })
+
+        # Mean reversion: widen lookback and entry strictness gradually.
+        windows = [8 + generation, 12 + generation * 2, 20 + generation * 3, 30 + generation * 4]
+        for window in windows:
+            for z_entry in (0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25):
+                for z_exit in (0.0, 0.15, 0.30, 0.50):
+                    if z_exit >= z_entry:
+                        continue
+                    for hold in (6, 12, 18, 24, 36, 48):
+                        yield Candidate("mean_reversion", {
+                            "window": window,
+                            "z_entry": z_entry,
+                            "z_exit": z_exit,
+                            "max_hold": hold,
+                        })
 
 
 def candidate_grid() -> List[Candidate]:
@@ -185,25 +282,40 @@ def evaluate_candidate(
     cost_bps: float,
     stress_cost_multiplier: float,
     min_oos_trades: int,
+    min_profit_factor: float = 1.15,
+    max_drawdown_pct: float = 6.0,
+    min_positive_symbol_ratio: float = 0.60,
 ) -> dict:
     train_trades: List[dict] = []
     oos_trades: List[dict] = []
     stress_oos_trades: List[dict] = []
+    per_symbol: Dict[str, dict] = {}
 
     for symbol, bars in bars_by_symbol.items():
         split = max(2, int(len(bars) * 0.70))
         train = bars[:split]
         test = bars[split:]
 
-        train_trades.extend(simulate(candidate, symbol, train, cost_bps))
-        oos_trades.extend(simulate(candidate, symbol, test, cost_bps))
-        stress_oos_trades.extend(
-            simulate(candidate, symbol, test, cost_bps * stress_cost_multiplier)
-        )
+        symbol_train = simulate(candidate, symbol, train, cost_bps)
+        symbol_oos = simulate(candidate, symbol, test, cost_bps)
+        symbol_stress = simulate(candidate, symbol, test, cost_bps * stress_cost_multiplier)
+        train_trades.extend(symbol_train)
+        oos_trades.extend(symbol_oos)
+        stress_oos_trades.extend(symbol_stress)
+        per_symbol[symbol] = {
+            "oos": metrics(symbol_oos),
+            "stress_oos": metrics(symbol_stress),
+        }
 
     train_metrics = metrics(train_trades)
     oos_metrics = metrics(oos_trades)
     stress_metrics = metrics(stress_oos_trades)
+    positive_symbols = sum(
+        1 for row in per_symbol.values()
+        if row["oos"]["trades"] > 0 and row["oos"]["expectancy_bps"] > 0
+    )
+    symbol_count = max(1, len(per_symbol))
+    positive_symbol_ratio = positive_symbols / symbol_count
 
     reasons: List[str] = []
     if train_metrics["expectancy_bps"] <= 0:
@@ -212,10 +324,15 @@ def evaluate_candidate(
         reasons.append(f"fewer than {min_oos_trades} out-of-sample trades")
     if oos_metrics["expectancy_bps"] <= 0:
         reasons.append("negative out-of-sample expectancy")
-    if oos_metrics["profit_factor"] < 1.10:
-        reasons.append("out-of-sample profit factor below 1.10")
-    if oos_metrics["max_drawdown_pct"] > 8.0:
-        reasons.append("out-of-sample drawdown above 8%")
+    if oos_metrics["profit_factor"] < min_profit_factor:
+        reasons.append(f"out-of-sample profit factor below {min_profit_factor:.2f}")
+    if oos_metrics["max_drawdown_pct"] > max_drawdown_pct:
+        reasons.append(f"out-of-sample drawdown above {max_drawdown_pct:.1f}%")
+    if positive_symbol_ratio < min_positive_symbol_ratio:
+        reasons.append(
+            f"positive on only {positive_symbols}/{len(per_symbol)} symbols "
+            f"(< {min_positive_symbol_ratio:.0%})"
+        )
     if stress_metrics["expectancy_bps"] <= 0:
         reasons.append("fails stressed transaction-cost test")
 
@@ -227,6 +344,10 @@ def evaluate_candidate(
         "train": train_metrics,
         "oos": oos_metrics,
         "stress_oos": stress_metrics,
+        "positive_symbol_ratio": round(positive_symbol_ratio, 3),
+        "positive_symbols": positive_symbols,
+        "symbol_count": len(per_symbol),
+        "per_symbol": per_symbol,
     }
 
 
