@@ -246,10 +246,11 @@ class StrategyLab:
                     )
                     results.append(result)
                     signature = candidate_signature(candidate)
-                    await self.store.save_result(signature, result)
                     if result["promoted"]:
                         promoted.append(result)
 
+                    # Update live state immediately. Persistence should never make
+                    # the dashboard look frozen while a DB pooler is slow.
                     self.state.progress = idx
                     self.state.tested_total += 1
                     self.state.promoted_total = len(promoted)
@@ -268,15 +269,42 @@ class StrategyLab:
                         reverse=True,
                     )
                     self._results = results[:250]
-                    await self.store.save_state(
-                        self.state.generation,
-                        self.state.tested_total,
-                        self.state.promoted_total,
-                    )
-                    log.info(
-                        "Strategy Lab persisted: tested_total=%s promoted_total=%s generation=%s",
-                        self.state.tested_total, self.state.promoted_total, self.state.generation
-                    )
+
+                    persisted_ok = False
+                    if self.store.enabled:
+                        for attempt in range(1, 4):
+                            try:
+                                await asyncio.wait_for(
+                                    self.store.save_checkpoint(
+                                        signature,
+                                        result,
+                                        self.state.generation,
+                                        self.state.tested_total,
+                                        self.state.promoted_total,
+                                    ),
+                                    timeout=8.0,
+                                )
+                                persisted_ok = True
+                                break
+                            except Exception as exc:
+                                log.warning(
+                                    "Strategy Lab checkpoint attempt %s/3 failed for %s: %s",
+                                    attempt, candidate.strategy, exc,
+                                )
+                                if attempt < 3:
+                                    await asyncio.sleep(0.5 * attempt)
+                    else:
+                        persisted_ok = True
+
+                    if persisted_ok:
+                        log.info(
+                            "Strategy Lab persisted: tested_total=%s promoted_total=%s generation=%s",
+                            self.state.tested_total, self.state.promoted_total, self.state.generation
+                        )
+                    else:
+                        # Keep searching. The result remains visible in-memory and
+                        # can be re-tested after a restart if persistence was down.
+                        self.state.message += " · DB checkpoint delayed"
                     self._summary = {
                         "symbols": list(bars_by_symbol.keys()),
                         "bars": {s: len(v) for s, v in bars_by_symbol.items()},
