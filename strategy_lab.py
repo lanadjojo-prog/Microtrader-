@@ -42,6 +42,16 @@ class LabState:
     incubator_done: int = 0
     deep_total: int = 0
     deep_done: int = 0
+    current_candidate: str = ""
+    current_params: dict | None = None
+    current_symbol: str = ""
+    current_symbol_index: int = 0
+    current_symbol_total: int = 0
+    current_candidate_started_at: Optional[str] = None
+    last_completed_candidate: str = ""
+    last_completed_at: Optional[str] = None
+    last_progress_at: Optional[str] = None
+    candidate_seconds: float = 0.0
 
 
 class StrategyLab:
@@ -57,6 +67,12 @@ class StrategyLab:
 
     def public_state(self) -> dict:
         payload = asdict(self.state)
+        if self.state.current_candidate_started_at and self.state.running:
+            try:
+                started = datetime.fromisoformat(self.state.current_candidate_started_at)
+                payload["candidate_seconds"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
+            except Exception:
+                pass
         payload["summary"] = self._summary
         return payload
 
@@ -166,10 +182,44 @@ class StrategyLab:
                     seen.add(candidate_signature(candidate))
 
                 for idx, candidate in enumerate(batch, start=1):
+                    candidate_phase = str(candidate.params.get("_phase", phase))
+                    # Fast funnel: Discovery gets a smaller but still broad sample,
+                    # Incubator gets more history, Deep Search must confirm on the
+                    # full configured dataset before promotion is possible.
+                    phase_bar_budget = {
+                        "discovery": min(5000, self.settings.lab_max_bars_per_symbol),
+                        "incubator": min(10000, self.settings.lab_max_bars_per_symbol),
+                        "deep_search": self.settings.lab_max_bars_per_symbol,
+                    }.get(candidate_phase, self.settings.lab_max_bars_per_symbol)
+                    tf = int(candidate.params.get("timeframe_min", 1))
                     candidate_bars = {
-                        s: aggregate_bars(v, int(candidate.params.get("timeframe_min", 1)))
+                        s: aggregate_bars(v[-phase_bar_budget:], tf)
                         for s, v in bars_by_symbol.items()
                     }
+
+                    self.state.current_candidate = candidate.strategy
+                    self.state.current_params = dict(candidate.params)
+                    self.state.current_symbol = ""
+                    self.state.current_symbol_index = 0
+                    self.state.current_symbol_total = len(candidate_bars)
+                    self.state.current_candidate_started_at = datetime.now(timezone.utc).isoformat()
+                    self.state.last_progress_at = self.state.current_candidate_started_at
+                    self.state.message = (
+                        f"{candidate_phase.replace('_',' ').title()}: candidate {idx}/{len(batch)} · "
+                        f"{candidate.strategy} · {tf}m · {phase_bar_budget} source bars/symbol"
+                    )
+                    log.info(
+                        "Strategy Lab candidate start: phase=%s strategy=%s tf=%sm bars_per_symbol=%s batch=%s/%s",
+                        candidate_phase, candidate.strategy, tf, phase_bar_budget, idx, len(batch)
+                    )
+
+                    def symbol_progress(symbol_index: int, symbol_total: int, symbol: str) -> None:
+                        self.state.current_symbol_index = symbol_index
+                        self.state.current_symbol_total = symbol_total
+                        self.state.current_symbol = symbol
+                        self.state.last_progress_at = datetime.now(timezone.utc).isoformat()
+
+                    started_candidate = datetime.now(timezone.utc)
                     result = await asyncio.to_thread(
                         evaluate_candidate,
                         candidate,
@@ -180,6 +230,19 @@ class StrategyLab:
                         self.settings.lab_min_profit_factor,
                         self.settings.lab_max_drawdown_pct,
                         self.settings.lab_min_positive_symbol_ratio,
+                        symbol_progress,
+                    )
+                    elapsed = (datetime.now(timezone.utc) - started_candidate).total_seconds()
+                    self.state.candidate_seconds = round(elapsed, 2)
+                    self.state.last_completed_candidate = candidate.strategy
+                    self.state.last_completed_at = datetime.now(timezone.utc).isoformat()
+                    self.state.last_progress_at = self.state.last_completed_at
+                    self.state.current_symbol = ""
+                    log.info(
+                        "Strategy Lab candidate complete: strategy=%s phase=%s seconds=%.2f funnel_stage=%s score=%s pf=%s exp_bps=%s",
+                        candidate.strategy, candidate_phase, elapsed, result.get("funnel_stage"),
+                        result.get("funnel_score"), (result.get("oos") or {}).get("profit_factor"),
+                        (result.get("oos") or {}).get("expectancy_bps")
                     )
                     results.append(result)
                     signature = candidate_signature(candidate)
@@ -489,13 +552,17 @@ def evaluate_candidate(
     min_profit_factor: float = 1.15,
     max_drawdown_pct: float = 6.0,
     min_positive_symbol_ratio: float = 0.60,
+    progress_callback=None,
 ) -> dict:
     train_trades: List[dict] = []
     oos_trades: List[dict] = []
     stress_oos_trades: List[dict] = []
     per_symbol: Dict[str, dict] = {}
 
-    for symbol, bars in bars_by_symbol.items():
+    symbol_items = list(bars_by_symbol.items())
+    for symbol_index, (symbol, bars) in enumerate(symbol_items, start=1):
+        if progress_callback:
+            progress_callback(symbol_index, len(symbol_items), symbol)
         split = max(2, int(len(bars) * 0.70))
         train = bars[:split]
         test = bars[split:]
@@ -540,11 +607,15 @@ def evaluate_candidate(
     if stress_metrics["expectancy_bps"] <= 0:
         reasons.append("fails stressed transaction-cost test")
 
-    promoted = not reasons
+    raw_pass = not reasons
+    candidate_phase = str(candidate.params.get("_phase", "discovery"))
+    promoted = raw_pass and candidate_phase == "deep_search"
+    if raw_pass and not promoted:
+        reasons.append("passes current filters; requires deep-search full-history confirmation")
     score = funnel_score(oos_metrics, stress_metrics, positive_symbol_ratio, min_oos_trades)
     if promoted:
         funnel_stage = "promoted"
-    elif (
+    elif raw_pass or (
         oos_metrics["trades"] >= max(20, min_oos_trades // 2)
         and oos_metrics["expectancy_bps"] > 0
         and oos_metrics["profit_factor"] >= 1.20
