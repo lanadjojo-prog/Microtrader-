@@ -55,6 +55,8 @@ class LabState:
     persistence_status: str = "idle"
     persistence_pending: int = 0
     last_persist_error: Optional[str] = None
+    paused: bool = False
+    pause_reason: str = ""
 
 
 class StrategyLab:
@@ -69,6 +71,8 @@ class StrategyLab:
         self.store = StrategyStore(settings.database_url)
         self._persist_queue: asyncio.Queue = asyncio.Queue()
         self._persist_task: Optional[asyncio.Task] = None
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()
 
     def public_state(self) -> dict:
         payload = asdict(self.state)
@@ -107,11 +111,27 @@ class StrategyLab:
         )
         self._results = []
         self._summary = {}
+        self._pause_event.set()
         if not self._persist_task or self._persist_task.done():
             self._persist_task = asyncio.create_task(
                 self._persistence_worker(), name="microtrader-strategy-persistence"
             )
         self._task = asyncio.create_task(self._run(), name="microtrader-strategy-lab")
+
+    async def pause(self, reason: str = ""):
+        if not self.state.running:
+            return
+        self.state.paused = True
+        self.state.pause_reason = reason or "Paused by research scheduler"
+        self._pause_event.clear()
+
+    async def resume(self):
+        if not self.state.running:
+            await self.start()
+            return
+        self.state.paused = False
+        self.state.pause_reason = ""
+        self._pause_event.set()
 
     async def stop(self):
         if self._task and not self._task.done():
@@ -214,6 +234,7 @@ class StrategyLab:
             self.state.total = batch_size
 
             while self.state.running:
+                await self._pause_event.wait()
                 self.state.generation += 1
                 self.state.progress = 0
                 self.state.total = batch_size
@@ -235,6 +256,7 @@ class StrategyLab:
                     seen.add(candidate_signature(candidate))
 
                 for idx, candidate in enumerate(batch, start=1):
+                    await self._pause_event.wait()
                     candidate_phase = str(candidate.params.get("_phase", phase))
                     # Fast funnel: Discovery gets a smaller but still broad sample,
                     # Incubator gets more history, Deep Search must confirm on the
