@@ -116,7 +116,6 @@ class StrategyLab:
             persisted_signatures = await self.store.load_signatures()
             persisted_state = await self.store.load_state()
 
-            stream = candidate_stream()
             seen = set(persisted_signatures)
             results: List[dict] = list(persisted)
             promoted: List[dict] = [r for r in results if r.get("promoted")]
@@ -142,14 +141,13 @@ class StrategyLab:
                     f"Generation {self.state.generation}: testing next {batch_size} candidates"
                 )
 
-                batch: List[Candidate] = []
-                while len(batch) < batch_size:
-                    candidate = next(stream)
-                    signature = candidate_signature(candidate)
-                    if signature in seen:
-                        continue
-                    seen.add(signature)
-                    batch.append(candidate)
+                batch = choose_batch(results, seen, self.state.generation, batch_size)
+                if not batch:
+                    self.state.stage = "completed"
+                    self.state.message = "No new discovery/incubator/deep-search candidates available"
+                    return
+                for candidate in batch:
+                    seen.add(candidate_signature(candidate))
 
                 for idx, candidate in enumerate(batch, start=1):
                     candidate_bars = {
