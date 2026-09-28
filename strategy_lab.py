@@ -325,7 +325,11 @@ def choose_batch(results: List[dict], seen: set[str], generation: int, batch_siz
     ]
     promising.sort(key=lambda r: float(r.get("funnel_score", 0)), reverse=True)
 
-    phase = "incubator" if any(r.get("params", {}).get("_phase") == "discovery" for r in promising[:12]) else "deep_search"
+    phase = "deep_search" if any(
+        r.get("params", {}).get("_phase") in {"incubator", "deep_search"}
+        or r.get("funnel_stage") == "deep_search"
+        for r in promising[:12]
+    ) else "incubator"
     candidates: List[Candidate] = []
     for row in promising[:12]:
         candidates.extend(parameter_variants(row, phase, generation))
