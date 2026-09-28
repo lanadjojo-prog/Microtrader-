@@ -249,9 +249,16 @@ class StrategyLab:
                     f"{phase.replace('_',' ').title()}: testing {len(batch)} candidates"
                 )
                 if not batch:
-                    self.state.stage = "completed"
-                    self.state.message = "No new discovery/incubator/deep-search candidates available"
-                    return
+                    self.state.stage = "expanding_search"
+                    self.state.message = (
+                        f"Generation {self.state.generation} exhausted; expanding search space"
+                    )
+                    log.info(
+                        "Strategy Lab generation exhausted: generation=%s; advancing",
+                        self.state.generation,
+                    )
+                    await asyncio.sleep(0.05)
+                    continue
                 for candidate in batch:
                     seen.add(candidate_signature(candidate))
 
