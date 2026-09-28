@@ -446,10 +446,34 @@ def evaluate_candidate(
     if stress_metrics["expectancy_bps"] <= 0:
         reasons.append("fails stressed transaction-cost test")
 
+    promoted = not reasons
+    score = funnel_score(oos_metrics, stress_metrics, positive_symbol_ratio, min_oos_trades)
+    if promoted:
+        funnel_stage = "promoted"
+    elif (
+        oos_metrics["trades"] >= max(20, min_oos_trades // 2)
+        and oos_metrics["expectancy_bps"] > 0
+        and oos_metrics["profit_factor"] >= 1.20
+        and stress_metrics["expectancy_bps"] > -1.0
+        and positive_symbol_ratio >= 0.40
+    ):
+        funnel_stage = "deep_search"
+    elif (
+        oos_metrics["trades"] >= 15
+        and (oos_metrics["expectancy_bps"] > 0 or oos_metrics["profit_factor"] >= 1.05)
+        and oos_metrics["max_drawdown_pct"] <= 12.0
+    ):
+        funnel_stage = "incubator"
+    else:
+        funnel_stage = "rejected"
+
     return {
         "strategy": candidate.strategy,
+        "family": candidate.strategy,
         "params": candidate.params,
-        "promoted": not reasons,
+        "promoted": promoted,
+        "funnel_stage": funnel_stage,
+        "funnel_score": score,
         "rejection_reasons": reasons,
         "train": train_metrics,
         "oos": oos_metrics,
@@ -459,6 +483,15 @@ def evaluate_candidate(
         "symbol_count": len(per_symbol),
         "per_symbol": per_symbol,
     }
+
+
+def funnel_score(oos: dict, stress: dict, positive_ratio: float, min_trades: int) -> float:
+    exp = max(0.0, min(35.0, 17.5 + float(oos.get("expectancy_bps", 0))))
+    pf = min(25.0, max(0.0, (float(oos.get("profit_factor", 0)) - 0.8) * 25.0))
+    stress_score = min(15.0, max(0.0, 7.5 + float(stress.get("expectancy_bps", 0))))
+    robustness = 15.0 * max(0.0, min(1.0, positive_ratio))
+    trades = 10.0 * min(1.0, float(oos.get("trades", 0)) / max(1, min_trades))
+    return round(exp + pf + stress_score + robustness + trades, 2)
 
 
 def simulate(
