@@ -75,6 +75,10 @@ class Settings:
     crypto_lab_maker_fee_bps: float = _float("CRYPTO_LAB_MAKER_FEE_BPS", 15.0)
     crypto_lab_z_entry: float = _float("CRYPTO_LAB_Z_ENTRY", 1.5)
     crypto_lab_imbalance_threshold: float = _float("CRYPTO_LAB_IMBALANCE_THRESHOLD", 0.35)
+    crypto_lab_notional_eur: float = _float("CRYPTO_LAB_NOTIONAL_EUR", 5.0)
+    crypto_lab_pending_cycles: int = _int("CRYPTO_LAB_PENDING_CYCLES", 5)
+    crypto_lab_max_hold_cycles: int = _int("CRYPTO_LAB_MAX_HOLD_CYCLES", 80)
+    crypto_lab_target_edge_bps: float = _float("CRYPTO_LAB_TARGET_EDGE_BPS", 10.0)
 
     @property
     def symbols(self) -> List[str]:
