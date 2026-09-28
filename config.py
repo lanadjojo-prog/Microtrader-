@@ -23,6 +23,7 @@ class Settings:
     live_trading_enabled: bool = _bool("LIVE_TRADING_ENABLED", False)
     auto_start: bool = _bool("AUTO_START", False)
     dashboard_token: str = os.getenv("DASHBOARD_TOKEN", "")
+    database_url: str = os.getenv("DATABASE_URL", "")
 
     symbols_raw: str = os.getenv(
         "SYMBOLS",
