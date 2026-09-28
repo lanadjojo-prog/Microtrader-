@@ -361,14 +361,16 @@ function renderLab(s,results){
  document.getElementById('labWork').innerHTML=
    '<span class="muted">Current work</span><b>'+esc(currentBits.join(' · ')||prettyLabName(s.stage||'idle'))+'</b>'+
    (symTotal?'<div class="progress" style="margin:8px 0 0"><div style="width:'+symbolPct+'%"></div></div>':'')+
-   '<div class="small muted">'+esc(s.last_completed_candidate?('Last completed: '+prettyLabName(s.last_completed_candidate)+(s.candidate_seconds?' · '+fmt(s.candidate_seconds,1)+'s':'')):'No candidate completed in this run yet.')+'</div>';
+   '<div class="small muted">'+esc(s.last_completed_candidate?('Last completed: '+prettyLabName(s.last_completed_candidate)+(s.candidate_seconds?' · '+fmt(s.candidate_seconds,1)+'s':'')):'No candidate completed in this run yet.')+'</div>'+
+   (s.last_persist_error?'<div class="small no">Persistence delayed: '+esc(s.last_persist_error)+'</div>':'');
  const vals={
    'Source data':sum.source_timeframe||'1Min',
    'Current stage':prettyLabName(s.stage||'idle'),
    'Tested':sum.candidates_tested??s.tested_total??results.length,
    'Incubator':fc.incubator??0,
    'Deep Search':fc.deep_search??0,
-   'Promoted':(fc.promoted??sum.promoted_count??s.promoted_total??0)+'/'+(sum.target_promoted??s.target_promoted??'-')
+   'Promoted':(fc.promoted??sum.promoted_count??s.promoted_total??0)+'/'+(sum.target_promoted??s.target_promoted??'-'),
+   'Persistence':prettyLabName(s.persistence_status||'idle')+(s.persistence_pending?(' · '+s.persistence_pending+' queued'):'')
  };
  document.getElementById('labMetrics').innerHTML=Object.entries(vals).map(([k,v])=>`<div class="metric"><span class="muted">${k}</span><b>${v}</b></div>`).join('');
  const promising=results.filter(x=>['incubator','deep_search','promoted'].includes(x.funnel_stage)).slice(0,6);
