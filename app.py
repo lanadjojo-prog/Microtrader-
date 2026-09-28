@@ -25,6 +25,8 @@ lab = StrategyLab(settings, client)
 async def lifespan(app: FastAPI):
     if settings.auto_start:
         await engine.start()
+    if settings.lab_auto_start and settings.api_key and settings.api_secret:
+        await lab.start()
     yield
     await engine.stop()
     await lab.stop()
@@ -209,7 +211,7 @@ function renderLab(s,results){
    'Data loaded': symbolTotal?symbolDone+'/'+symbolTotal:'-',
    'Candidates': total?done+'/'+total:'-',
    'Tested': sum.candidates_tested??results.length,
-   'Promoted': sum.promoted_count??0
+   'Promoted': (sum.promoted_count??s.promoted_total??0)+'/'+(sum.target_promoted??s.target_promoted??'-')
  };
  document.getElementById('labMetrics').innerHTML=Object.entries(vals).map(([k,v])=>`<div class="metric"><span class="muted">${k}</span><b>${v}</b></div>`).join('');
  if(!results.length){
