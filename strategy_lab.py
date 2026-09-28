@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from alpaca_client import AlpacaClient
 from config import Settings
+from strategy_store import StrategyStore
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class StrategyLab:
         self._task: Optional[asyncio.Task] = None
         self._results: List[dict] = []
         self._summary: dict = {}
+        self.store = StrategyStore(settings.database_url)
 
     def public_state(self) -> dict:
         payload = asdict(self.state)
@@ -100,11 +102,21 @@ class StrategyLab:
             if not bars_by_symbol:
                 raise RuntimeError("No usable historical bars returned for Strategy Lab")
 
+            await self.store.init()
+            persisted = await self.store.load_results(limit=250)
+            persisted_signatures = await self.store.load_signatures()
+            persisted_state = await self.store.load_state()
+
             stream = candidate_stream()
-            seen = set()
-            results: List[dict] = []
-            promoted: List[dict] = []
+            seen = set(persisted_signatures)
+            results: List[dict] = list(persisted)
+            promoted: List[dict] = [r for r in results if r.get("promoted")]
             batch_size = max(1, self.settings.lab_batch_size)
+
+            self.state.generation = int(persisted_state.get("generation", 0))
+            self.state.tested_total = int(persisted_state.get("tested_total", len(seen)))
+            self.state.promoted_total = int(persisted_state.get("promoted_total", len(promoted)))
+            self._results = list(results)
 
             self.state.stage = "testing"
             self.state.total = batch_size
@@ -120,7 +132,7 @@ class StrategyLab:
                 batch: List[Candidate] = []
                 while len(batch) < batch_size:
                     candidate = next(stream)
-                    signature = (candidate.strategy, tuple(sorted(candidate.params.items())))
+                    signature = candidate_signature(candidate)
                     if signature in seen:
                         continue
                     seen.add(signature)
@@ -138,6 +150,8 @@ class StrategyLab:
                         min_positive_symbol_ratio=self.settings.lab_min_positive_symbol_ratio,
                     )
                     results.append(result)
+                    signature = candidate_signature(candidate)
+                    await self.store.save_result(signature, result)
                     if result["promoted"]:
                         promoted.append(result)
 
@@ -158,6 +172,11 @@ class StrategyLab:
                         reverse=True,
                     )
                     self._results = results[:250]
+                    await self.store.save_state(
+                        self.state.generation,
+                        self.state.tested_total,
+                        self.state.promoted_total,
+                    )
                     self._summary = {
                         "symbols": list(bars_by_symbol.keys()),
                         "bars": {s: len(v) for s, v in bars_by_symbol.items()},
@@ -204,6 +223,11 @@ class StrategyLab:
         finally:
             self.state.running = False
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
+
+
+def candidate_signature(candidate: Candidate) -> str:
+    import json
+    return candidate.strategy + ":" + json.dumps(candidate.params, sort_keys=True, separators=(",", ":"))
 
 
 def candidate_stream():
