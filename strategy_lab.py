@@ -52,6 +52,9 @@ class LabState:
     last_completed_at: Optional[str] = None
     last_progress_at: Optional[str] = None
     candidate_seconds: float = 0.0
+    persistence_status: str = "idle"
+    persistence_pending: int = 0
+    last_persist_error: Optional[str] = None
 
 
 class StrategyLab:
@@ -64,6 +67,8 @@ class StrategyLab:
         self._summary: dict = {}
         self._agent_focus: dict = {"families": [], "timeframes": [], "reason": ""}
         self.store = StrategyStore(settings.database_url)
+        self._persist_queue: asyncio.Queue = asyncio.Queue()
+        self._persist_task: Optional[asyncio.Task] = None
 
     def public_state(self) -> dict:
         payload = asdict(self.state)
@@ -102,6 +107,10 @@ class StrategyLab:
         )
         self._results = []
         self._summary = {}
+        if not self._persist_task or self._persist_task.done():
+            self._persist_task = asyncio.create_task(
+                self._persistence_worker(), name="microtrader-strategy-persistence"
+            )
         self._task = asyncio.create_task(self._run(), name="microtrader-strategy-lab")
 
     async def stop(self):
@@ -113,6 +122,46 @@ class StrategyLab:
                 pass
         self.state.running = False
         self._task = None
+        if self._persist_task and not self._persist_task.done():
+            self._persist_task.cancel()
+            try:
+                await self._persist_task
+            except asyncio.CancelledError:
+                pass
+        self._persist_task = None
+
+    async def _persistence_worker(self):
+        """Persist checkpoints independently so database latency cannot stop research."""
+        while True:
+            item = await self._persist_queue.get()
+            signature, result, generation, tested_total, promoted_total = item
+            self.state.persistence_pending = self._persist_queue.qsize() + 1
+            self.state.persistence_status = "saving"
+            try:
+                await asyncio.wait_for(
+                    self.store.save_checkpoint(
+                        signature, result, generation, tested_total, promoted_total
+                    ),
+                    timeout=8.0,
+                )
+                self.state.persistence_status = "ok"
+                self.state.last_persist_error = None
+                log.info(
+                    "Strategy Lab persisted: tested_total=%s promoted_total=%s generation=%s",
+                    tested_total, promoted_total, generation,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.state.persistence_status = "delayed"
+                self.state.last_persist_error = str(exc)[:300]
+                log.warning("Strategy Lab persistence delayed: %s", exc)
+                # Requeue once at the back; research itself keeps moving.
+                await asyncio.sleep(1.0)
+                self._persist_queue.put_nowait(item)
+            finally:
+                self._persist_queue.task_done()
+                self.state.persistence_pending = self._persist_queue.qsize()
 
     async def _run(self):
         try:
@@ -149,7 +198,10 @@ class StrategyLab:
             batch_size = max(1, self.settings.lab_batch_size)
 
             self.state.generation = int(persisted_state.get("generation", 0))
-            self.state.tested_total = int(persisted_state.get("tested_total", len(seen)))
+            self.state.tested_total = max(
+                int(persisted_state.get("tested_total", len(seen))),
+                len(seen),
+            )
             self.state.promoted_total = int(persisted_state.get("promoted_total", len(promoted)))
             self._results = list(results)
             log.info(
@@ -270,41 +322,22 @@ class StrategyLab:
                     )
                     self._results = results[:250]
 
-                    persisted_ok = False
+                    # Queue persistence instead of awaiting the database. A slow
+                    # Supabase pooler must never pause strategy discovery.
                     if self.store.enabled:
-                        for attempt in range(1, 4):
-                            try:
-                                await asyncio.wait_for(
-                                    self.store.save_checkpoint(
-                                        signature,
-                                        result,
-                                        self.state.generation,
-                                        self.state.tested_total,
-                                        self.state.promoted_total,
-                                    ),
-                                    timeout=8.0,
-                                )
-                                persisted_ok = True
-                                break
-                            except Exception as exc:
-                                log.warning(
-                                    "Strategy Lab checkpoint attempt %s/3 failed for %s: %s",
-                                    attempt, candidate.strategy, exc,
-                                )
-                                if attempt < 3:
-                                    await asyncio.sleep(0.5 * attempt)
+                        self._persist_queue.put_nowait((
+                            signature,
+                            result,
+                            self.state.generation,
+                            self.state.tested_total,
+                            self.state.promoted_total,
+                        ))
+                        self.state.persistence_pending = self._persist_queue.qsize()
+                        if self.state.persistence_status == "idle":
+                            self.state.persistence_status = "queued"
                     else:
-                        persisted_ok = True
+                        self.state.persistence_status = "disabled"
 
-                    if persisted_ok:
-                        log.info(
-                            "Strategy Lab persisted: tested_total=%s promoted_total=%s generation=%s",
-                            self.state.tested_total, self.state.promoted_total, self.state.generation
-                        )
-                    else:
-                        # Keep searching. The result remains visible in-memory and
-                        # can be re-tested after a restart if persistence was down.
-                        self.state.message += " · DB checkpoint delayed"
                     self._summary = {
                         "symbols": list(bars_by_symbol.keys()),
                         "bars": {s: len(v) for s, v in bars_by_symbol.items()},
