@@ -312,13 +312,22 @@ function renderLab(s,results){
    document.getElementById('labResults').innerHTML='<p class="muted">No results yet. During data loading this is normal.</p>';
    return;
  }
- const rows=results.map((x,i)=>{
-   const o=x.oos||{}, st=x.stress_oos||{};
-   const status=x.promoted?'<span class="ok">PROMOTED</span>':'<span class="no">REJECTED</span>';
-   const why=x.promoted?'—':esc((x.rejection_reasons||[]).join('; '));
-   return `<tr><td>${i+1}</td><td>${esc(x.strategy)}</td><td class="small">${esc(JSON.stringify(x.params))}</td><td>${status}</td><td>${o.trades??0}</td><td>${fmt(o.win_rate_pct)}%</td><td>${fmt(o.expectancy_bps,3)} bps</td><td>${fmt(o.profit_factor,3)}</td><td>${fmt(o.max_drawdown_pct,3)}%</td><td>${fmt(st.expectancy_bps,3)} bps</td><td class="small">${why}</td></tr>`;
- }).join('');
- document.getElementById('labResults').innerHTML=`<table class="lab-table"><thead><tr><th>#</th><th>Strategy</th><th>Parameters</th><th>Status</th><th>OOS trades</th><th>Win rate</th><th>OOS expectancy</th><th>PF</th><th>Drawdown</th><th>Stress expectancy</th><th>Reason</th></tr></thead><tbody>${rows}</tbody></table>`;
+ const promoted=results.filter(x=>x.promoted);
+ const rejected=results.filter(x=>!x.promoted);
+ function labRows(items){
+   return items.map((x,i)=>{
+     const o=x.oos||{}, st=x.stress_oos||{};
+     const status=x.promoted?'<span class="ok">PROMOTED</span>':'<span class="no">REJECTED</span>';
+     const why=x.promoted?'—':esc((x.rejection_reasons||[]).join('; '));
+     return `<tr><td>${i+1}</td><td>${esc(x.strategy)}</td><td class="small">${esc(JSON.stringify(x.params))}</td><td>${status}</td><td>${o.trades??0}</td><td>${fmt(o.win_rate_pct)}%</td><td>${fmt(o.expectancy_bps,3)} bps</td><td>${fmt(o.profit_factor,3)}</td><td>${fmt(o.max_drawdown_pct,3)}%</td><td>${fmt(st.expectancy_bps,3)} bps</td><td class="small">${why}</td></tr>`;
+   }).join('');
+ }
+ const head='<table class="lab-table"><thead><tr><th>#</th><th>Strategy</th><th>Parameters</th><th>Status</th><th>OOS trades</th><th>Win rate</th><th>OOS expectancy</th><th>PF</th><th>Drawdown</th><th>Stress expectancy</th><th>Reason</th></tr></thead><tbody>';
+ let html='<div class="small muted" style="margin:10px 0">'+promoted.length+' promoted · '+rejected.length+' rejected</div>';
+ if(promoted.length) html+=head+labRows(promoted)+'</tbody></table>';
+ else html+='<p class="muted">Nog geen promoted strategieën.</p>';
+ if(rejected.length) html+='<details><summary>Rejected strategieën tonen ('+rejected.length+')</summary>'+head+labRows(rejected)+'</tbody></table></details>';
+ document.getElementById('labResults').innerHTML=html;
 }
 async function loadLab(manual=false){
  try{
