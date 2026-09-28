@@ -220,7 +220,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 <div class="card"><h3>Recent executions</h3><pre id="executions">Not connected.</pre></div>
 <div class="card" id="stock-lab">
   <div class="section-title"><h3>Stock Strategy Lab</h3><span class="pill">ALPACA · RESEARCH</span></div>
-  <p class="muted">Backtests candidate strategies on historical Alpaca bars with a chronological holdout and stressed transaction costs.</p>
+  <p class="muted">Discovery funnel on 1-minute source data: broad strategy families first, then Incubator and Deep Search only for promising directions.</p>
   <div class="row"><button onclick="labAction('start')">Run Strategy Lab</button><button onclick="labAction('stop')">Stop Lab</button><button onclick="loadLab(true)">Refresh Lab</button></div>
   <div class="lab-head" style="margin-top:14px">
     <div id="labStatus"><span class="pill">IDLE</span></div>
@@ -300,11 +300,14 @@ function renderLab(s,results){
  document.getElementById('labMessage').textContent=s.message||'';
  document.getElementById('labUpdated').textContent=s.completed_at?('Completed '+new Date(s.completed_at).toLocaleString()):(s.started_at?('Started '+new Date(s.started_at).toLocaleString()):'');
  const sum=s.summary||{};
+ const fc=sum.funnel_counts||{};
  const vals={
-   'Data loaded': symbolTotal?symbolDone+'/'+symbolTotal:'-',
-   'Candidates': total?done+'/'+total:'-',
-   'Tested': sum.candidates_tested??results.length,
-   'Promoted': (sum.promoted_count??s.promoted_total??0)+'/'+(sum.target_promoted??s.target_promoted??'-')
+   'Source data':sum.source_timeframe||'1Min',
+   'Current stage':prettyLabName(s.stage||'idle'),
+   'Tested':sum.candidates_tested??results.length,
+   'Incubator':fc.incubator??0,
+   'Deep Search':fc.deep_search??0,
+   'Promoted':(fc.promoted??sum.promoted_count??s.promoted_total??0)+'/'+(sum.target_promoted??s.target_promoted??'-')
  };
  document.getElementById('labMetrics').innerHTML=Object.entries(vals).map(([k,v])=>`<div class="metric"><span class="muted">${k}</span><b>${v}</b></div>`).join('');
  if(!results.length){
@@ -312,20 +315,36 @@ function renderLab(s,results){
    return;
  }
  const promoted=results.filter(x=>x.promoted);
- const rejected=results.filter(x=>!x.promoted);
+ const deep=results.filter(x=>x.funnel_stage==='deep_search' && !x.promoted);
+ const incubator=results.filter(x=>x.funnel_stage==='incubator');
+ const rejected=results.filter(x=>!x.promoted && !['deep_search','incubator'].includes(x.funnel_stage));
  function labRows(items){
    return items.map((x,i)=>{
      const o=x.oos||{}, st=x.stress_oos||{};
-     const status=x.promoted?'<span class="ok">PROMOTED</span>':'<span class="no">REJECTED</span>';
+     const status=x.promoted?'<span class="ok">PROMOTED</span>':(x.funnel_stage==='deep_search'?'<span class="ok">DEEP SEARCH</span>':(x.funnel_stage==='incubator'?'<span class="pill run">INCUBATOR</span>':'<span class="no">REJECTED</span>'));
      const why=x.promoted?'—':esc((x.rejection_reasons||[]).join('; '));
-     return `<tr><td>${i+1}</td><td>${esc(x.strategy)}</td><td class="small">${esc(JSON.stringify(x.params))}</td><td>${status}</td><td>${o.trades??0}</td><td>${fmt(o.win_rate_pct)}%</td><td>${fmt(o.expectancy_bps,3)} bps</td><td>${fmt(o.profit_factor,3)}</td><td>${fmt(o.max_drawdown_pct,3)}%</td><td>${fmt(st.expectancy_bps,3)} bps</td><td class="small">${why}</td></tr>`;
+     const tf=(x.params||{}).timeframe_min||'-';
+     return `<tr><td>${i+1}</td><td>${esc(x.strategy)}</td><td>${tf}m</td><td>${status}</td><td>${fmt(x.funnel_score,1)}</td><td>${o.trades??0}</td><td>${fmt(o.win_rate_pct,1)}%</td><td>${fmt(o.payoff_ratio,2)}x</td><td>${fmt(o.expectancy_r,2)}R</td><td>${fmt(o.expectancy_bps,3)} bps</td><td>${fmt(o.profit_factor,2)}</td><td>${fmt(st.expectancy_bps,3)} bps</td><td class="small">${why}</td></tr>`;
    }).join('');
  }
- const head='<table class="lab-table"><thead><tr><th>#</th><th>Strategy</th><th>Parameters</th><th>Status</th><th>OOS trades</th><th>Win rate</th><th>OOS expectancy</th><th>PF</th><th>Drawdown</th><th>Stress expectancy</th><th>Reason</th></tr></thead><tbody>';
- let html='<div class="small muted" style="margin:10px 0">'+promoted.length+' promoted · '+rejected.length+' rejected</div>';
- if(promoted.length) html+=head+labRows(promoted)+'</tbody></table>';
- else html+='<p class="muted">Nog geen promoted strategieën.</p>';
- if(rejected.length) html+='<details><summary>Rejected strategieën tonen ('+rejected.length+')</summary>'+head+labRows(rejected)+'</tbody></table></details>';
+ const head='<table class="lab-table"><thead><tr><th>#</th><th>Family</th><th>TF</th><th>Stage</th><th>Score</th><th>OOS trades</th><th>Winrate</th><th>Payoff</th><th>Exp. R</th><th>OOS exp.</th><th>PF</th><th>Stress exp.</th><th>Why not promoted?</th></tr></thead><tbody>';
+ let html='<div class="row small" style="margin:10px 0"><span class="pill good">'+promoted.length+' promoted</span><span class="pill run">'+deep.length+' deep search</span><span class="pill">'+incubator.length+' incubator</span><span class="pill">'+rejected.length+' rejected</span></div>';
+ const near=(sum.near_misses||[]).slice(0,5);
+ if(near.length){
+   html+='<h4 style="margin-bottom:6px">Most promising / near misses</h4>'+head+labRows(near)+'</tbody></table>';
+ }
+ if(promoted.length){
+   html+='<h4 style="margin-bottom:6px">Promoted</h4>'+head+labRows(promoted)+'</tbody></table>';
+ }
+ if(deep.length){
+   html+='<h4 style="margin-bottom:6px">Deep Search</h4>'+head+labRows(deep.slice(0,10))+'</tbody></table>';
+ }
+ if(incubator.length){
+   html+='<details open><summary>Incubator ('+incubator.length+')</summary>'+head+labRows(incubator.slice(0,15))+'</tbody></table></details>';
+ }
+ if(rejected.length){
+   html+='<details><summary>Rejected strategieën tonen ('+rejected.length+')</summary>'+head+labRows(rejected)+'</tbody></table></details>';
+ }
  document.getElementById('labResults').innerHTML=html;
 }
 async function loadLab(manual=false){
