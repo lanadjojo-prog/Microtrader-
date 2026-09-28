@@ -63,7 +63,11 @@ class ResearchAgent:
         self.state.started_at = datetime.now(timezone.utc).isoformat()
         self.state.stage = "starting"
         self.state.message = "Research agent starting"
-        await self._init_store()
+        try:
+            await self._init_store()
+        except Exception as exc:
+            self.state.last_error = f"Persistence unavailable: {exc}"
+            log.warning("Research agent persistence unavailable at startup: %s", exc)
         self._task = asyncio.create_task(self._run(), name="microtrader-research-agent")
 
     async def stop(self):
