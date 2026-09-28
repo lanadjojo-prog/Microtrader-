@@ -139,8 +139,9 @@ class StrategyLab:
             self.state.persistence_status = "saving"
             try:
                 await asyncio.wait_for(
-                    self.store.save_checkpoint(
-                        signature, result, generation, tested_total, promoted_total
+                    asyncio.to_thread(
+                        self.store.save_checkpoint_sync,
+                        signature, result, generation, tested_total, promoted_total,
                     ),
                     timeout=8.0,
                 )
