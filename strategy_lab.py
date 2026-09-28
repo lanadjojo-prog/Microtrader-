@@ -52,6 +52,7 @@ class StrategyLab:
         self._task: Optional[asyncio.Task] = None
         self._results: List[dict] = []
         self._summary: dict = {}
+        self._agent_focus: dict = {"families": [], "timeframes": [], "reason": ""}
         self.store = StrategyStore(settings.database_url)
 
     def public_state(self) -> dict:
@@ -61,6 +62,16 @@ class StrategyLab:
 
     def results(self) -> List[dict]:
         return list(self._results)
+
+    def set_agent_focus(self, families: List[str], timeframes: List[int], reason: str = "") -> None:
+        self._agent_focus = {
+            "families": [str(x) for x in families][:6],
+            "timeframes": [int(x) for x in timeframes if int(x) in {1, 3, 5, 15}][:4],
+            "reason": str(reason)[:500],
+        }
+
+    def agent_focus(self) -> dict:
+        return dict(self._agent_focus)
 
     async def start(self):
         if self.state.running:
@@ -137,7 +148,10 @@ class StrategyLab:
                 self.state.generation += 1
                 self.state.progress = 0
                 self.state.total = batch_size
-                batch = choose_batch(results, seen, self.state.generation, batch_size)
+                batch = choose_batch(
+                    results, seen, self.state.generation, batch_size,
+                    focus=self._agent_focus,
+                )
                 phase = str(batch[0].params.get("_phase", "discovery")) if batch else "discovery"
                 self.state.stage = phase
                 self.state.total = len(batch)
@@ -204,6 +218,7 @@ class StrategyLab:
                         "symbols": list(bars_by_symbol.keys()),
                         "bars": {s: len(v) for s, v in bars_by_symbol.items()},
                         "source_timeframe": self.settings.lab_timeframe,
+                        "agent_focus": self.agent_focus(),
                         "candidates_tested": self.state.tested_total,
                         "promoted_count": len(promoted),
                         "target_promoted": self.settings.lab_target_promoted,
@@ -313,11 +328,27 @@ def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candi
     return out
 
 
-def choose_batch(results: List[dict], seen: set[str], generation: int, batch_size: int) -> List[Candidate]:
+def choose_batch(
+    results: List[dict],
+    seen: set[str],
+    generation: int,
+    batch_size: int,
+    focus: Optional[dict] = None,
+) -> List[Candidate]:
+    focus = focus or {}
+    focus_families = set(focus.get("families") or [])
+    focus_timeframes = set(int(x) for x in (focus.get("timeframes") or []))
     pending_discovery = [
         c for c in discovery_candidates()
         if candidate_signature(c) not in seen
     ]
+    pending_discovery.sort(
+        key=lambda c: (
+            c.strategy in focus_families if focus_families else False,
+            int(c.params.get("timeframe_min", 0)) in focus_timeframes if focus_timeframes else False,
+        ),
+        reverse=True,
+    )
     if pending_discovery:
         return pending_discovery[:batch_size]
 
@@ -326,7 +357,14 @@ def choose_batch(results: List[dict], seen: set[str], generation: int, batch_siz
         if r.get("funnel_stage") in {"incubator", "deep_search", "promoted"}
         and r.get("params", {}).get("_phase") in {"discovery", "incubator", "deep_search"}
     ]
-    promising.sort(key=lambda r: float(r.get("funnel_score", 0)), reverse=True)
+    promising.sort(
+        key=lambda r: (
+            r.get("strategy") in focus_families if focus_families else False,
+            int((r.get("params") or {}).get("timeframe_min", 0)) in focus_timeframes if focus_timeframes else False,
+            float(r.get("funnel_score", 0)),
+        ),
+        reverse=True,
+    )
 
     phase = "deep_search" if any(
         r.get("params", {}).get("_phase") in {"incubator", "deep_search"}
