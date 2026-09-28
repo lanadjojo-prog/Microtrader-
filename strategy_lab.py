@@ -202,6 +202,7 @@ class StrategyLab:
                     self._summary = {
                         "symbols": list(bars_by_symbol.keys()),
                         "bars": {s: len(v) for s, v in bars_by_symbol.items()},
+                        "source_timeframe": self.settings.lab_timeframe,
                         "candidates_tested": self.state.tested_total,
                         "promoted_count": len(promoted),
                         "target_promoted": self.settings.lab_target_promoted,
@@ -297,7 +298,8 @@ def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candi
         for mult in multipliers:
             q = dict(base)
             v = base[key]
-            nv = v * mult * (1.0 + (0.02 * generation if phase == "deep_search" else 0.0))
+            deep_gen = min(max(1, generation), 8)
+            nv = v * mult * (1.0 + (0.02 * deep_gen if phase == "deep_search" else 0.0))
             q[key] = max(1, int(round(nv))) if isinstance(v, int) else round(max(0.01, nv), 4)
             q["_phase"] = phase
             out.append(Candidate(strategy, q))
