@@ -742,6 +742,10 @@ def metrics(trades: List[dict]) -> dict:
             "profit_factor": 0.0,
             "compounded_trade_return_pct": 0.0,
             "max_drawdown_pct": 0.0,
+            "avg_win_bps": 0.0,
+            "avg_loss_bps": 0.0,
+            "payoff_ratio": 0.0,
+            "expectancy_r": 0.0,
         }
 
     ordered = sorted(trades, key=lambda x: str(x.get("exit_time") or ""))
@@ -761,6 +765,10 @@ def metrics(trades: List[dict]) -> dict:
         dd = (peak - equity) / peak
         max_dd = max(max_dd, dd)
 
+    avg_win = mean(wins) if wins else 0.0
+    avg_loss = abs(mean(losses)) if losses else 0.0
+    payoff = avg_win / avg_loss if avg_loss > 0 else (999.0 if avg_win > 0 else 0.0)
+    r_values = [float(t["r_multiple"]) for t in ordered if t.get("r_multiple") is not None]
     return {
         "trades": len(returns),
         "win_rate_pct": round(100.0 * len(wins) / len(returns), 2),
@@ -768,4 +776,8 @@ def metrics(trades: List[dict]) -> dict:
         "profit_factor": round(min(pf, 999.0), 3),
         "compounded_trade_return_pct": round((equity - 1.0) * 100.0, 3),
         "max_drawdown_pct": round(max_dd * 100.0, 3),
+        "avg_win_bps": round(avg_win * 10_000.0, 3),
+        "avg_loss_bps": round(avg_loss * 10_000.0, 3),
+        "payoff_ratio": round(min(payoff, 999.0), 3),
+        "expectancy_r": round(mean(r_values), 3) if r_values else 0.0,
     }
