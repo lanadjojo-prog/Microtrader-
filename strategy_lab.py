@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import mean, pstdev
@@ -9,6 +10,8 @@ from typing import Dict, List, Optional
 from alpaca_client import AlpacaClient
 from config import Settings
 from strategy_store import StrategyStore
+
+log = logging.getLogger("microtrader.strategy_lab")
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,10 @@ class StrategyLab:
             self.state.tested_total = int(persisted_state.get("tested_total", len(seen)))
             self.state.promoted_total = int(persisted_state.get("promoted_total", len(promoted)))
             self._results = list(results)
+            log.info(
+                "Strategy Lab resume: loaded_results=%s loaded_signatures=%s generation=%s tested_total=%s promoted_total=%s",
+                len(results), len(seen), self.state.generation, self.state.tested_total, self.state.promoted_total
+            )
 
             self.state.stage = "testing"
             self.state.total = batch_size
@@ -176,6 +183,10 @@ class StrategyLab:
                         self.state.generation,
                         self.state.tested_total,
                         self.state.promoted_total,
+                    )
+                    log.info(
+                        "Strategy Lab persisted: tested_total=%s promoted_total=%s generation=%s",
+                        self.state.tested_total, self.state.promoted_total, self.state.generation
                     )
                     self._summary = {
                         "symbols": list(bars_by_symbol.keys()),
