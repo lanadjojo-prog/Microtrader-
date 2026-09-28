@@ -11,6 +11,7 @@ from config import settings
 from engine import TradingEngine
 from strategy_lab import StrategyLab
 from research_labs import ResearchLabs
+from crypto_lab import CryptoMicrostructureLab
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,6 +22,7 @@ client = AlpacaClient(settings)
 engine = TradingEngine(settings, client)
 lab = StrategyLab(settings, client)
 research = ResearchLabs(settings, client)
+crypto_lab = CryptoMicrostructureLab(settings)
 
 
 @asynccontextmanager
@@ -31,10 +33,13 @@ async def lifespan(app: FastAPI):
         await lab.start()
     if settings.research_auto_start and settings.api_key and settings.api_secret:
         await research.start()
+    if settings.crypto_lab_auto_start:
+        await crypto_lab.start()
     yield
     await engine.stop()
     await lab.stop()
     await research.stop()
+    await crypto_lab.close()
     await client.close()
 
 
@@ -137,6 +142,26 @@ async def research_start(authorization: str | None = Header(default=None)):
 async def research_stop(authorization: str | None = Header(default=None)):
     require_token(authorization)
     await research.stop()
+    return {"ok": True, "running": False}
+
+
+@app.get("/api/crypto-lab/status")
+async def crypto_lab_status(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return crypto_lab.public_state()
+
+
+@app.post("/api/crypto-lab/start")
+async def crypto_lab_start(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await crypto_lab.start()
+    return {"ok": True, "running": True}
+
+
+@app.post("/api/crypto-lab/stop")
+async def crypto_lab_stop(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await crypto_lab.stop()
     return {"ok": True, "running": False}
 
 
