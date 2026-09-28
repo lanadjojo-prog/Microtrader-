@@ -10,6 +10,7 @@ from alpaca_client import AlpacaClient
 from config import settings
 from engine import TradingEngine
 from strategy_lab import StrategyLab
+from research_labs import ResearchLabs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,6 +20,7 @@ logging.basicConfig(
 client = AlpacaClient(settings)
 engine = TradingEngine(settings, client)
 lab = StrategyLab(settings, client)
+research = ResearchLabs(settings, client)
 
 
 @asynccontextmanager
@@ -27,9 +29,12 @@ async def lifespan(app: FastAPI):
         await engine.start()
     if settings.lab_auto_start and settings.api_key and settings.api_secret:
         await lab.start()
+    if settings.research_auto_start and settings.api_key and settings.api_secret:
+        await research.start()
     yield
     await engine.stop()
     await lab.stop()
+    await research.stop()
     await client.close()
 
 
@@ -113,6 +118,28 @@ async def lab_stop(authorization: str | None = Header(default=None)):
     return {"ok": True, "running": False}
 
 
+@app.get("/api/research/status")
+async def research_status(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return research.public_state()
+
+
+@app.post("/api/research/start")
+async def research_start(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    if not settings.api_key or not settings.api_secret:
+        raise HTTPException(status_code=503, detail="Alpaca API credentials are not configured")
+    await research.start()
+    return {"ok": True, "running": True}
+
+
+@app.post("/api/research/stop")
+async def research_stop(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await research.stop()
+    return {"ok": True, "running": False}
+
+
 @app.post("/api/start")
 async def start(authorization: str | None = Header(default=None)):
     require_token(authorization)
@@ -172,6 +199,14 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
   <div id="labMessage" class="muted">Not run yet.</div>
   <div id="labMetrics" class="grid" style="margin-top:12px"></div>
   <div id="labResults" class="scroll"></div>
+</div>
+<div class="card">
+  <h3>Research Labs</h3>
+  <p class="muted">17 specialised labs for robustness, sizing, compounding, risk and aggressive-growth research.</p>
+  <div class="row"><button onclick="researchAction('start')">Run Research Labs</button><button onclick="researchAction('stop')">Stop Research Labs</button><button onclick="loadResearch()">Refresh</button></div>
+  <div id="researchStatus" class="row" style="margin-top:14px"></div>
+  <div id="researchMetrics" class="grid" style="margin-top:12px"></div>
+  <pre id="researchResults" class="small">Not loaded.</pre>
 </div>
 <div class="card"><h3>Raw status</h3><pre id="raw"></pre></div>
 <script>
@@ -256,6 +291,22 @@ async function labAction(x){
   document.getElementById('labMessage').textContent=msg;
  }
 }
-setInterval(()=>{if(token()){loadStatus();loadLab()}},5000);
+async function loadResearch(){
+ try{
+  const s=await api('research/status');
+  document.getElementById('researchStatus').innerHTML=`<span class="pill ${s.running?'run':'good'}">${s.running?'RUNNING':'IDLE'}</span><span class="muted small">${esc(s.current_lab||'')}</span>`;
+  const vals={'Completed labs':(s.completed_labs||0)+'/'+(s.total_labs||0),'Current':s.current_lab||'-','Error':s.last_error||'none'};
+  document.getElementById('researchMetrics').innerHTML=Object.entries(vals).map(([k,v])=>`<div class="metric"><span class="muted">${k}</span><b>${esc(v)}</b></div>`).join('');
+  document.getElementById('researchResults').textContent=JSON.stringify(s.labs||{},null,2);
+ }catch(e){
+  document.getElementById('researchResults').textContent=e.message==='Unauthorized'?'Dashboard token ontbreekt of is ongeldig.':e.message;
+ }
+}
+async function researchAction(x){try{await api('research/'+x,'POST');await loadResearch()}catch(e){document.getElementById('researchResults').textContent=e.message}}
+const savedToken=sessionStorage.getItem('microtraderDashboardToken')||'';
+document.getElementById('token').value=savedToken;
+document.getElementById('token').addEventListener('input',e=>sessionStorage.setItem('microtraderDashboardToken',e.target.value));
+setInterval(()=>{if(token()){loadStatus();loadLab();loadResearch()}},5000);
+if(token()){loadStatus();loadLab();loadResearch();}
 </script>
 </body></html>'''
