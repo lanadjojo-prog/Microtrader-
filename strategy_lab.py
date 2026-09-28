@@ -36,6 +36,12 @@ class LabState:
     tested_total: int = 0
     promoted_total: int = 0
     target_promoted: int = 0
+    discovery_total: int = 0
+    discovery_done: int = 0
+    incubator_total: int = 0
+    incubator_done: int = 0
+    deep_total: int = 0
+    deep_done: int = 0
 
 
 class StrategyLab:
@@ -146,9 +152,13 @@ class StrategyLab:
                     batch.append(candidate)
 
                 for idx, candidate in enumerate(batch, start=1):
+                    candidate_bars = {
+                        s: aggregate_bars(v, int(candidate.params.get("timeframe_min", 1)))
+                        for s, v in bars_by_symbol.items()
+                    }
                     result = evaluate_candidate(
                         candidate,
-                        bars_by_symbol,
+                        candidate_bars,
                         cost_bps=self.settings.lab_cost_bps,
                         stress_cost_multiplier=self.settings.lab_stress_cost_multiplier,
                         min_oos_trades=self.settings.lab_min_oos_trades,
@@ -195,6 +205,17 @@ class StrategyLab:
                         "promoted_count": len(promoted),
                         "target_promoted": self.settings.lab_target_promoted,
                         "generation": self.state.generation,
+                        "funnel_counts": {
+                            "promoted": sum(1 for r in results if r.get("funnel_stage") == "promoted"),
+                            "deep_search": sum(1 for r in results if r.get("funnel_stage") == "deep_search"),
+                            "incubator": sum(1 for r in results if r.get("funnel_stage") == "incubator"),
+                            "rejected": sum(1 for r in results if r.get("funnel_stage", "rejected") == "rejected"),
+                        },
+                        "near_misses": sorted(
+                            [r for r in results if not r.get("promoted")],
+                            key=lambda r: float(r.get("funnel_score", 0)),
+                            reverse=True,
+                        )[:10],
                         "best_candidate": promoted[0] if promoted else (results[0] if results else None),
                         "cost_bps_per_side": self.settings.lab_cost_bps,
                         "stress_cost_multiplier": self.settings.lab_stress_cost_multiplier,
