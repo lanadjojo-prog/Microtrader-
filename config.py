@@ -64,6 +64,8 @@ class Settings:
     lab_min_profit_factor: float = _float("LAB_MIN_PROFIT_FACTOR", 1.50)
     lab_max_drawdown_pct: float = _float("LAB_MAX_DRAWDOWN_PCT", 6.0)
     lab_min_positive_symbol_ratio: float = _float("LAB_MIN_POSITIVE_SYMBOL_RATIO", 0.60)
+    research_auto_start: bool = _bool("RESEARCH_AUTO_START", True)
+    research_interval_seconds: int = _int("RESEARCH_INTERVAL_SECONDS", 21600)
 
     @property
     def symbols(self) -> List[str]:
