@@ -24,6 +24,10 @@ class LabState:
     last_error: Optional[str] = None
     progress: int = 0
     total: int = 0
+    stage: str = "idle"
+    message: str = "Not started"
+    symbols_loaded: int = 0
+    symbols_total: int = 0
 
 
 class StrategyLab:
@@ -49,6 +53,9 @@ class StrategyLab:
         self.state = LabState(
             running=True,
             started_at=datetime.now(timezone.utc).isoformat(),
+            stage="starting",
+            message="Preparing Strategy Lab",
+            symbols_total=len(self.settings.lab_symbols),
         )
         self._results = []
         self._summary = {}
@@ -69,7 +76,10 @@ class StrategyLab:
             end = datetime.now(timezone.utc)
             start = end - timedelta(days=self.settings.lab_lookback_days)
             bars_by_symbol: Dict[str, List[dict]] = {}
+            self.state.stage = "loading_data"
+            self.state.message = "Loading historical market data"
             for symbol in self.settings.lab_symbols:
+                self.state.message = f"Loading {symbol}"
                 bars = await self.client.historical_bars(
                     symbol=symbol,
                     start=start,
@@ -79,9 +89,12 @@ class StrategyLab:
                 )
                 if len(bars) >= 100:
                     bars_by_symbol[symbol] = bars
+                self.state.symbols_loaded += 1
 
             candidates = candidate_grid()
             self.state.total = len(candidates)
+            self.state.stage = "testing"
+            self.state.message = f"Testing {len(candidates)} strategy candidates"
             if not bars_by_symbol:
                 raise RuntimeError("No usable historical bars returned for Strategy Lab")
 
@@ -96,6 +109,8 @@ class StrategyLab:
                 )
                 results.append(result)
                 self.state.progress = idx
+                self.state.message = f"Tested {idx}/{len(candidates)} candidates"
+                await asyncio.sleep(0)
 
             results.sort(
                 key=lambda row: (
@@ -107,6 +122,8 @@ class StrategyLab:
             )
             self._results = results
             promoted = [r for r in results if r["promoted"]]
+            self.state.stage = "completed"
+            self.state.message = "Strategy Lab completed"
             self._summary = {
                 "symbols": list(bars_by_symbol.keys()),
                 "bars": {s: len(v) for s, v in bars_by_symbol.items()},
@@ -118,9 +135,13 @@ class StrategyLab:
                 "method": "chronological 70/30 holdout; next-bar-open fills; long-only; no overlapping position per symbol",
             }
         except asyncio.CancelledError:
+            self.state.stage = "stopped"
+            self.state.message = "Strategy Lab stopped"
             raise
         except Exception as exc:
             self.state.last_error = str(exc)
+            self.state.stage = "error"
+            self.state.message = str(exc)
         finally:
             self.state.running = False
             self.state.completed_at = datetime.now(timezone.utc).isoformat()

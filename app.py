@@ -147,8 +147,8 @@ DASHBOARD = r'''<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>MicroTrader</title>
 <style>
-body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9eef5;margin:0;padding:28px;max-width:1000px;margin:auto}
-.card{background:#171c24;border:1px solid #2a3442;border-radius:16px;padding:18px;margin:14px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}button,input{font:inherit;border-radius:10px;border:1px solid #3a4658;padding:10px 13px;background:#0f141b;color:#fff}button{cursor:pointer}button.danger{border-color:#8a3841}.muted{color:#96a4b5}pre{white-space:pre-wrap;word-break:break-word}h1{margin-bottom:0}.pill{padding:5px 9px;border-radius:999px;background:#242d39}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#111720;padding:12px;border-radius:12px}.metric b{display:block;font-size:1.3rem;margin-top:4px}</style>
+body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9eef5;margin:0;padding:28px;max-width:1100px;margin:auto}
+.card{background:#171c24;border:1px solid #2a3442;border-radius:16px;padding:18px;margin:14px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}button,input{font:inherit;border-radius:10px;border:1px solid #3a4658;padding:10px 13px;background:#0f141b;color:#fff}button{cursor:pointer}button.danger{border-color:#8a3841}.muted{color:#96a4b5}pre{white-space:pre-wrap;word-break:break-word}h1{margin-bottom:0}.pill{padding:5px 9px;border-radius:999px;background:#242d39}.pill.good{background:#17351f}.pill.bad{background:#3a1c22}.pill.run{background:#17314a}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}.metric{background:#111720;padding:12px;border-radius:12px}.metric b{display:block;font-size:1.3rem;margin-top:4px}.progress{height:12px;background:#0f141b;border:1px solid #2a3442;border-radius:999px;overflow:hidden;margin:12px 0}.progress>div{height:100%;background:#e9eef5;width:0%;transition:width .25s ease}.lab-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.lab-table{width:100%;border-collapse:collapse;margin-top:14px;font-size:.92rem}.lab-table th,.lab-table td{text-align:left;padding:9px 8px;border-bottom:1px solid #2a3442;vertical-align:top}.lab-table th{color:#96a4b5;font-weight:600}.ok{color:#8de39e}.no{color:#ff9da8}.small{font-size:.85rem}.scroll{overflow-x:auto}</style>
 </head>
 <body>
 <h1>MicroTrader</h1><p class="muted">Alpaca micro-trading engine · safe-by-default</p>
@@ -161,8 +161,15 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 <div class="card">
   <h3>Strategy Lab</h3>
   <p class="muted">Backtests candidate strategies on historical Alpaca bars with a chronological holdout and stressed transaction costs.</p>
-  <div class="row"><button onclick="labAction('start')">Run Strategy Lab</button><button onclick="labAction('stop')">Stop Lab</button><button onclick="loadLab()">Refresh Lab</button></div>
-  <pre id="lab">Not run yet.</pre>
+  <div class="row"><button onclick="labAction('start')">Run Strategy Lab</button><button onclick="labAction('stop')">Stop Lab</button><button onclick="loadLab(true)">Refresh Lab</button></div>
+  <div class="lab-head" style="margin-top:14px">
+    <div id="labStatus"><span class="pill">IDLE</span></div>
+    <div id="labUpdated" class="muted small"></div>
+  </div>
+  <div class="progress"><div id="labProgress"></div></div>
+  <div id="labMessage" class="muted">Not run yet.</div>
+  <div id="labMetrics" class="grid" style="margin-top:12px"></div>
+  <div id="labResults" class="scroll"></div>
 </div>
 <div class="card"><h3>Raw status</h3><pre id="raw"></pre></div>
 <script>
@@ -182,14 +189,50 @@ async function loadStatus(){
  }catch(e){alert(e.message)}
 }
 async function action(x){try{await api(x,'POST');await loadStatus()}catch(e){alert(e.message)}}
-async function loadLab(){
- try{
-  const s=await api('lab/status');
-  const r=await api('lab/results');
-  document.getElementById('lab').textContent=JSON.stringify({state:s,results:r.results},null,2);
- }catch(e){document.getElementById('lab').textContent='Lab error: '+e.message}
+function fmt(v,d=2){return (v===null||v===undefined)?'-':Number(v).toFixed(d)}
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function renderLab(s,results){
+ const done=Number(s.progress||0), total=Number(s.total||0);
+ const symbolDone=Number(s.symbols_loaded||0), symbolTotal=Number(s.symbols_total||0);
+ let pct=0;
+ if(s.stage==='loading_data' && symbolTotal) pct=Math.round((symbolDone/symbolTotal)*35);
+ else if(total) pct=Math.round(35+(done/total)*65);
+ if(s.stage==='completed') pct=100;
+ document.getElementById('labProgress').style.width=Math.max(0,Math.min(100,pct))+'%';
+ const cls=s.running?'run':(s.last_error?'bad':(s.completed_at?'good':''));
+ const label=s.running?'RUNNING':(s.last_error?'ERROR':(s.completed_at?'COMPLETED':'IDLE'));
+ document.getElementById('labStatus').innerHTML=`<span class="pill ${cls}">${label}</span> <span class="muted small">${esc(s.stage||'idle')}</span>`;
+ document.getElementById('labMessage').textContent=s.message||'';
+ document.getElementById('labUpdated').textContent=s.completed_at?('Completed '+new Date(s.completed_at).toLocaleString()):(s.started_at?('Started '+new Date(s.started_at).toLocaleString()):'');
+ const sum=s.summary||{};
+ const vals={
+   'Data loaded': symbolTotal?symbolDone+'/'+symbolTotal:'-',
+   'Candidates': total?done+'/'+total:'-',
+   'Tested': sum.candidates_tested??results.length,
+   'Promoted': sum.promoted_count??0
+ };
+ document.getElementById('labMetrics').innerHTML=Object.entries(vals).map(([k,v])=>`<div class="metric"><span class="muted">${k}</span><b>${v}</b></div>`).join('');
+ if(!results.length){
+   document.getElementById('labResults').innerHTML='<p class="muted">No results yet. During data loading this is normal.</p>';
+   return;
+ }
+ const rows=results.map((x,i)=>{
+   const o=x.oos||{}, st=x.stress_oos||{};
+   const status=x.promoted?'<span class="ok">PROMOTED</span>':'<span class="no">REJECTED</span>';
+   const why=x.promoted?'—':esc((x.rejection_reasons||[]).join('; '));
+   return `<tr><td>${i+1}</td><td>${esc(x.strategy)}</td><td class="small">${esc(JSON.stringify(x.params))}</td><td>${status}</td><td>${o.trades??0}</td><td>${fmt(o.win_rate_pct)}%</td><td>${fmt(o.expectancy_bps,3)} bps</td><td>${fmt(o.profit_factor,3)}</td><td>${fmt(o.max_drawdown_pct,3)}%</td><td>${fmt(st.expectancy_bps,3)} bps</td><td class="small">${why}</td></tr>`;
+ }).join('');
+ document.getElementById('labResults').innerHTML=`<table class="lab-table"><thead><tr><th>#</th><th>Strategy</th><th>Parameters</th><th>Status</th><th>OOS trades</th><th>Win rate</th><th>OOS expectancy</th><th>PF</th><th>Drawdown</th><th>Stress expectancy</th><th>Reason</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
-async function labAction(x){try{await api('lab/'+x,'POST');await loadLab()}catch(e){alert(e.message)}}
-setInterval(()=>{if(token()){loadStatus();loadLab()}},15000);
+async function loadLab(manual=false){
+ try{
+  const [s,r]=await Promise.all([api('lab/status'),api('lab/results')]);
+  renderLab(s,r.results||[]);
+ }catch(e){
+  document.getElementById('labMessage').textContent='Lab error: '+e.message;
+ }
+}
+async function labAction(x){try{await api('lab/'+x,'POST');await loadLab(true)}catch(e){alert(e.message)}}
+setInterval(()=>{if(token()){loadStatus();loadLab()}},5000);
 </script>
 </body></html>'''
