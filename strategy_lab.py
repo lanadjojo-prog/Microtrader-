@@ -301,32 +301,55 @@ def discovery_candidates() -> List[Candidate]:
 
 
 def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candidate]:
+    """Create deterministic local variants around a promising candidate.
+
+    Generation changes the perturbation grid so Incubator/Deep Search never
+    silently exhaust after a handful of batches, while keeping changes local.
+    """
     strategy = str(row.get("strategy"))
     base = dict(row.get("params") or {})
     base["_phase"] = phase
     out: List[Candidate] = []
-    multipliers = (0.75, 1.0, 1.25) if phase == "incubator" else (0.9, 1.0, 1.1)
+
+    # Cycle through increasingly fine local offsets. This produces genuinely
+    # different trading parameters without adding signature-only metadata.
+    g = max(1, int(generation))
+    band = 0.30 if phase == "incubator" else 0.16
+    slot = ((g - 1) % 31) - 15
+    center_shift = (slot / 15.0) * band if slot else 0.0
+    local_offsets = (
+        center_shift - band / 5.0,
+        center_shift,
+        center_shift + band / 5.0,
+    )
+
     keys = [
         k for k, v in base.items()
-        if isinstance(v, (int, float)) and k not in {"timeframe_min", "target_r"}
-    ][:3]
+        if isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and k not in {"timeframe_min", "target_r"}
+    ][:4]
+
     for key in keys:
-        for mult in multipliers:
+        for offset in local_offsets:
             q = dict(base)
             v = base[key]
-            deep_gen = min(max(1, generation), 8)
-            nv = v * mult * (1.0 + (0.02 * deep_gen if phase == "deep_search" else 0.0))
+            nv = float(v) * (1.0 + offset)
             q[key] = max(1, int(round(nv))) if isinstance(v, int) else round(max(0.01, nv), 4)
             q["_phase"] = phase
             out.append(Candidate(strategy, q))
+
     if strategy == "asymmetric_breakout":
-        for r in (2.0, 3.0, 5.0, 8.0, 10.0):
+        # Explore asymmetric payoffs densely around the current target as well
+        # as a few canonical R multiples.
+        base_r = float(base.get("target_r", 3.0))
+        r_shift = 0.25 * (((g - 1) % 21) - 10)
+        for r in sorted({2.0, 3.0, 5.0, 8.0, 10.0, max(1.25, base_r + r_shift)}):
             q = dict(base)
-            q["target_r"] = r
+            q["target_r"] = round(r, 2)
             q["_phase"] = phase
             out.append(Candidate(strategy, q))
     return out
-
 
 def choose_batch(
     results: List[dict],
@@ -386,19 +409,42 @@ def choose_batch(
         if len(unique) >= batch_size:
             return unique
 
-    # If nothing has shown promise, broaden Discovery instead of endlessly tuning weak families.
+    # If nothing has shown promise, keep broadening Discovery. The previous
+    # version clamped this at generation 6, which eventually exhausted every
+    # signature and made the lab stop around ~760 tests.
+    g = max(1, generation)
+    epoch = max(0, (g - 1) // 6)
+    wave = 1 + ((g - 1) % 6)
     for tf in (1, 3, 5, 15):
-        g = min(6, max(1, generation))
         broad = [
-            Candidate("breakout", {"timeframe_min": tf, "_phase": "discovery", "window": 10 + 5*g, "buffer_bps": 2.0 + g, "max_hold": 12 + 4*g}),
-            Candidate("extreme_reversal", {"timeframe_min": tf, "_phase": "discovery", "window": 8 + 2*g, "shock_z": 1.5 + 0.15*g, "max_hold": 8 + 2*g}),
-            Candidate("volatility_breakout", {"timeframe_min": tf, "_phase": "discovery", "window": 12 + 3*g, "vol_mult": 1.2 + 0.1*g, "max_hold": 12 + 3*g}),
-            Candidate("asymmetric_breakout", {"timeframe_min": tf, "_phase": "discovery", "window": 15 + 5*g, "stop_atr": 0.5 + 0.05*g, "target_r": 5.0, "max_hold": 40 + 5*g}),
+            Candidate("momentum", {"timeframe_min": tf, "_phase": "discovery",
+                "fast": 2 + (wave % 5), "slow": 10 + 3*wave + 2*epoch,
+                "entry_bps": round(3.0 + 1.5*wave + 0.25*epoch, 2), "max_hold": 8 + 3*wave + epoch}),
+            Candidate("mean_reversion", {"timeframe_min": tf, "_phase": "discovery",
+                "window": 10 + 4*wave + 2*epoch, "z_entry": round(0.8 + 0.18*wave + 0.03*epoch, 2),
+                "z_exit": round(0.05*((wave + epoch) % 7), 2), "max_hold": 10 + 3*wave + epoch}),
+            Candidate("breakout", {"timeframe_min": tf, "_phase": "discovery",
+                "window": 10 + 5*wave + 2*epoch, "buffer_bps": round(2.0 + wave + 0.25*epoch, 2),
+                "max_hold": 12 + 4*wave + epoch}),
+            Candidate("extreme_reversal", {"timeframe_min": tf, "_phase": "discovery",
+                "window": 8 + 2*wave + 2*epoch, "shock_z": round(1.4 + 0.15*wave + 0.03*epoch, 2),
+                "max_hold": 8 + 2*wave + epoch}),
+            Candidate("volatility_breakout", {"timeframe_min": tf, "_phase": "discovery",
+                "window": 12 + 3*wave + 2*epoch, "vol_mult": round(1.1 + 0.1*wave + 0.02*epoch, 2),
+                "max_hold": 12 + 3*wave + epoch}),
+            Candidate("trend_pullback", {"timeframe_min": tf, "_phase": "discovery",
+                "fast": 4 + wave, "slow": 20 + 4*wave + 2*epoch,
+                "pullback_z": round(0.6 + 0.12*wave + 0.02*epoch, 2), "max_hold": 12 + 3*wave + epoch}),
+            Candidate("asymmetric_breakout", {"timeframe_min": tf, "_phase": "discovery",
+                "window": 15 + 5*wave + 2*epoch, "stop_atr": round(0.4 + 0.05*wave + 0.01*epoch, 2),
+                "target_r": float((3, 5, 8, 10, 12, 15)[(wave - 1) % 6]),
+                "max_hold": 30 + 5*wave + 2*epoch}),
         ]
         for cand in broad:
             sig = candidate_signature(cand)
             if sig not in seen and sig not in local:
-                local.add(sig); unique.append(cand)
+                local.add(sig)
+                unique.append(cand)
                 if len(unique) >= batch_size:
                     return unique
     return unique
