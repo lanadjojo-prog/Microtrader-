@@ -345,7 +345,7 @@ class StrategyLab:
                     results.sort(
                         key=lambda row: (
                             stage_rank.get(row.get("funnel_stage", "rejected"), 0),
-                            float(row.get("funnel_score", 0)),
+                            float(row.get("funnel_score") or 0),
                             float((row.get("oos") or {}).get("expectancy_bps") or 0),
                         ),
                         reverse=True,
@@ -385,7 +385,7 @@ class StrategyLab:
                         },
                         "near_misses": sorted(
                             [r for r in results if not r.get("promoted")],
-                            key=lambda r: float(r.get("funnel_score", 0)),
+                            key=lambda r: float(r.get("funnel_score") or 0),
                             reverse=True,
                         )[:10],
                         "best_candidate": promoted[0] if promoted else (results[0] if results else None),
@@ -539,7 +539,7 @@ def choose_batch(
         key=lambda r: (
             r.get("strategy") in focus_families if focus_families else False,
             int((r.get("params") or {}).get("timeframe_min", 0)) in focus_timeframes if focus_timeframes else False,
-            float(r.get("funnel_score", 0)),
+            float(r.get("funnel_score") or 0),
         ),
         reverse=True,
     )
