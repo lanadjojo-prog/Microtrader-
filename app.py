@@ -564,7 +564,7 @@ async function researchAction(x){try{await api('research/'+x,'POST');await loadR
 const savedToken=sessionStorage.getItem('microtraderDashboardToken')||'';
 document.getElementById('token').value=savedToken;
 document.getElementById('token').addEventListener('input',e=>sessionStorage.setItem('microtraderDashboardToken',e.target.value));
-setInterval(()=>{if(token()){loadStatus();loadLab();loadCrypto();loadResearch()}},5000);
-if(token()){loadStatus();loadLab();loadCrypto();loadResearch();}
+setInterval(()=>{if(token()){loadStatus();loadAgent();loadLab();loadCrypto();loadResearch()}},5000);
+if(token()){loadStatus();loadAgent();loadLab();loadCrypto();loadResearch();}
 </script>
 </body></html>'''
