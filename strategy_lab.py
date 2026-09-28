@@ -346,7 +346,7 @@ class StrategyLab:
                         key=lambda row: (
                             stage_rank.get(row.get("funnel_stage", "rejected"), 0),
                             float(row.get("funnel_score", 0)),
-                            row["oos"]["expectancy_bps"],
+                            float((row.get("oos") or {}).get("expectancy_bps") or 0),
                         ),
                         reverse=True,
                     )
@@ -424,6 +424,7 @@ class StrategyLab:
             self.state.last_error = str(exc)
             self.state.stage = "error"
             self.state.message = str(exc)
+            log.exception("Strategy Lab failed")
         finally:
             self.state.running = False
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
