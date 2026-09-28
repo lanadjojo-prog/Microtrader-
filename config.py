@@ -57,6 +57,7 @@ class Settings:
     lab_stress_cost_multiplier: float = _float("LAB_STRESS_COST_MULTIPLIER", 2.0)
     lab_min_oos_trades: int = _int("LAB_MIN_OOS_TRADES", 100)
     lab_continuous: bool = _bool("LAB_CONTINUOUS", True)
+    lab_auto_start: bool = _bool("LAB_AUTO_START", True)
     lab_target_promoted: int = _int("LAB_TARGET_PROMOTED", 3)
     lab_batch_size: int = _int("LAB_BATCH_SIZE", 25)
     lab_min_profit_factor: float = _float("LAB_MIN_PROFIT_FACTOR", 1.15)
