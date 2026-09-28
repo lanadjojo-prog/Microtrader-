@@ -50,6 +50,186 @@ class CryptoMicrostructureLab:
             "imbalance_signals": 0,
             "hybrid_signals": 0,
         })
+        self._sim = {}
+        self._sim_history = defaultdict(list)
+
+    def _sim_key(self, strategy: str, symbol: str) -> str:
+        return f"{strategy}:{symbol}"
+
+    def _ensure_sim(self, strategy: str, symbol: str) -> dict:
+        key = self._sim_key(strategy, symbol)
+        if key not in self._sim:
+            self._sim[key] = {
+                "strategy": strategy,
+                "market": symbol,
+                "state": "flat",
+                "pending_side": None,
+                "pending_price": None,
+                "pending_age": 0,
+                "entry_price": None,
+                "entry_cycle": None,
+                "exit_quote": None,
+                "exit_age": 0,
+                "trades": 0,
+                "wins": 0,
+                "gross_pnl_eur": 0.0,
+                "fees_eur": 0.0,
+                "net_pnl_eur": 0.0,
+                "equity_eur": 0.0,
+                "peak_equity_eur": 0.0,
+                "max_drawdown_eur": 0.0,
+                "sum_return_bps": 0.0,
+            }
+        return self._sim[key]
+
+    def _entry_condition(self, strategy: str, zscore: float, imbalance: float, maker_signal: bool) -> bool:
+        if strategy == "mean_reversion":
+            return zscore <= -self.settings.crypto_lab_z_entry
+        if strategy == "market_maker":
+            return maker_signal
+        if strategy == "imbalance":
+            return imbalance >= self.settings.crypto_lab_imbalance_threshold
+        if strategy == "hybrid":
+            return (
+                zscore <= -self.settings.crypto_lab_z_entry
+                and imbalance >= self.settings.crypto_lab_imbalance_threshold
+                and maker_signal
+            )
+        return False
+
+    def _exit_condition(self, strategy: str, zscore: float, imbalance: float, hold_cycles: int) -> bool:
+        if hold_cycles >= self.settings.crypto_lab_max_hold_cycles:
+            return True
+        if strategy == "mean_reversion":
+            return zscore >= 0
+        if strategy == "market_maker":
+            return True
+        if strategy == "imbalance":
+            return imbalance <= 0
+        if strategy == "hybrid":
+            return zscore >= 0 or imbalance <= 0
+        return False
+
+    def _advance_simulator(self, symbol: str, bid: float, ask: float, zscore: float, imbalance: float, maker_signal: bool, now: str):
+        notional = self.settings.crypto_lab_notional_eur
+        fee_rate = self.settings.crypto_lab_maker_fee_bps / 10000.0
+        strategies = ("mean_reversion", "market_maker", "imbalance", "hybrid")
+
+        for strategy in strategies:
+            s = self._ensure_sim(strategy, symbol)
+
+            if s["state"] == "flat" and self._entry_condition(strategy, zscore, imbalance, maker_signal):
+                s["state"] = "entry_pending"
+                s["pending_side"] = "buy"
+                s["pending_price"] = bid
+                s["pending_age"] = 0
+
+            elif s["state"] == "entry_pending":
+                s["pending_age"] += 1
+                # Conservative maker fill model: buy quote only fills after the ask trades down to our bid.
+                if ask <= float(s["pending_price"]):
+                    s["state"] = "open"
+                    s["entry_price"] = float(s["pending_price"])
+                    s["entry_cycle"] = self.state.cycles
+                    s["pending_price"] = None
+                    s["pending_age"] = 0
+                elif s["pending_age"] >= self.settings.crypto_lab_pending_cycles:
+                    s["state"] = "flat"
+                    s["pending_price"] = None
+                    s["pending_age"] = 0
+
+            elif s["state"] == "open":
+                hold = max(0, self.state.cycles - int(s["entry_cycle"] or self.state.cycles))
+                if self._exit_condition(strategy, zscore, imbalance, hold):
+                    target = ask
+                    if strategy == "market_maker":
+                        target = max(
+                            ask,
+                            float(s["entry_price"]) * (
+                                1 + (
+                                    2 * self.settings.crypto_lab_maker_fee_bps
+                                    + self.settings.crypto_lab_target_edge_bps
+                                ) / 10000.0
+                            ),
+                        )
+                    s["state"] = "exit_pending"
+                    s["exit_quote"] = target
+                    s["exit_age"] = 0
+
+            elif s["state"] == "exit_pending":
+                s["exit_age"] += 1
+                # Conservative maker fill model: sell quote only fills after bid reaches our ask.
+                if bid >= float(s["exit_quote"]):
+                    entry = float(s["entry_price"])
+                    exit_price = float(s["exit_quote"])
+                    qty = notional / entry if entry > 0 else 0.0
+                    gross = qty * (exit_price - entry)
+                    fees = notional * fee_rate + (qty * exit_price) * fee_rate
+                    net = gross - fees
+                    ret_bps = (net / notional) * 10000 if notional > 0 else 0.0
+
+                    s["trades"] += 1
+                    s["wins"] += int(net > 0)
+                    s["gross_pnl_eur"] += gross
+                    s["fees_eur"] += fees
+                    s["net_pnl_eur"] += net
+                    s["equity_eur"] += net
+                    s["peak_equity_eur"] = max(s["peak_equity_eur"], s["equity_eur"])
+                    dd = s["peak_equity_eur"] - s["equity_eur"]
+                    s["max_drawdown_eur"] = max(s["max_drawdown_eur"], dd)
+                    s["sum_return_bps"] += ret_bps
+
+                    self._sim_history[strategy].append({
+                        "market": symbol,
+                        "entry": round(entry, 8),
+                        "exit": round(exit_price, 8),
+                        "gross_pnl_eur": round(gross, 6),
+                        "fees_eur": round(fees, 6),
+                        "net_pnl_eur": round(net, 6),
+                        "return_bps": round(ret_bps, 4),
+                        "closed_at": now,
+                    })
+                    if len(self._sim_history[strategy]) > 200:
+                        self._sim_history[strategy] = self._sim_history[strategy][-200:]
+
+                    s["state"] = "flat"
+                    s["entry_price"] = None
+                    s["entry_cycle"] = None
+                    s["exit_quote"] = None
+                    s["exit_age"] = 0
+                elif s["exit_age"] >= self.settings.crypto_lab_pending_cycles:
+                    # Cancel stale exit and re-evaluate next cycle.
+                    s["state"] = "open"
+                    s["exit_quote"] = None
+                    s["exit_age"] = 0
+
+    def _sim_summary(self) -> dict:
+        out = {}
+        for strategy in ("mean_reversion", "market_maker", "imbalance", "hybrid"):
+            rows = [s for s in self._sim.values() if s["strategy"] == strategy]
+            trades = sum(int(s["trades"]) for s in rows)
+            wins = sum(int(s["wins"]) for s in rows)
+            gross = sum(float(s["gross_pnl_eur"]) for s in rows)
+            fees = sum(float(s["fees_eur"]) for s in rows)
+            net = sum(float(s["net_pnl_eur"]) for s in rows)
+            sum_bps = sum(float(s["sum_return_bps"]) for s in rows)
+            max_dd = max([float(s["max_drawdown_eur"]) for s in rows] or [0.0])
+            open_positions = sum(1 for s in rows if s["state"] in {"open", "exit_pending"})
+            pending = sum(1 for s in rows if s["state"] == "entry_pending")
+            out[strategy] = {
+                "trades": trades,
+                "wins": wins,
+                "win_rate_pct": round((wins / trades * 100) if trades else 0.0, 2),
+                "gross_pnl_eur": round(gross, 4),
+                "fees_eur": round(fees, 4),
+                "net_pnl_eur": round(net, 4),
+                "expectancy_bps": round((sum_bps / trades) if trades else 0.0, 4),
+                "max_drawdown_eur": round(max_dd, 4),
+                "open_positions": open_positions,
+                "pending_entries": pending,
+                "recent_trades": list(self._sim_history[strategy][-8:]),
+            }
+        return out
 
     async def start(self):
         if self.state.running:
@@ -148,6 +328,8 @@ class CryptoMicrostructureLab:
             stats["imbalance_signals"] += int(imbalance_signal)
             stats["hybrid_signals"] += int(hybrid_signal)
 
+            self._advance_simulator(symbol, bid, ask, zscore, imbalance, maker_signal, now)
+
             self._latest[symbol] = {
                 "market": symbol,
                 "bid": bid,
@@ -190,5 +372,13 @@ class CryptoMicrostructureLab:
             "imbalance_threshold": self.settings.crypto_lab_imbalance_threshold,
             "markets": [self._latest[s] for s in self.settings.crypto_lab_symbols if s in self._latest],
             "strategy_stats": {k: dict(v) for k, v in self._stats.items()},
+            "paper_simulation": {
+                "fill_model": "conservative maker-touch",
+                "notional_eur_per_trade": self.settings.crypto_lab_notional_eur,
+                "pending_cycles": self.settings.crypto_lab_pending_cycles,
+                "max_hold_cycles": self.settings.crypto_lab_max_hold_cycles,
+                "target_edge_bps": self.settings.crypto_lab_target_edge_bps,
+                "strategies": self._sim_summary(),
+            },
         })
         return payload
