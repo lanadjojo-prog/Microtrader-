@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from alpaca_client import AlpacaClient
 from config import settings
 from engine import TradingEngine
+from strategy_lab import StrategyLab
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,6 +18,7 @@ logging.basicConfig(
 
 client = AlpacaClient(settings)
 engine = TradingEngine(settings, client)
+lab = StrategyLab(settings, client)
 
 
 @asynccontextmanager
@@ -25,10 +27,11 @@ async def lifespan(app: FastAPI):
         await engine.start()
     yield
     await engine.stop()
+    await lab.stop()
     await client.close()
 
 
-app = FastAPI(title="MicroTrader", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="MicroTrader", version="0.2.0", lifespan=lifespan)
 
 
 def require_token(authorization: str | None):
@@ -80,6 +83,34 @@ async def executions(authorization: str | None = Header(default=None)):
     return {"executions": engine.executions()}
 
 
+@app.get("/api/lab/status")
+async def lab_status(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return lab.public_state()
+
+
+@app.get("/api/lab/results")
+async def lab_results(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return {"results": lab.results(), "state": lab.public_state()}
+
+
+@app.post("/api/lab/start")
+async def lab_start(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    if not settings.api_key or not settings.api_secret:
+        raise HTTPException(status_code=503, detail="Alpaca API credentials are not configured")
+    await lab.start()
+    return {"ok": True, "running": True}
+
+
+@app.post("/api/lab/stop")
+async def lab_stop(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await lab.stop()
+    return {"ok": True, "running": False}
+
+
 @app.post("/api/start")
 async def start(authorization: str | None = Header(default=None)):
     require_token(authorization)
@@ -127,6 +158,12 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 <div class="card"><div id="headline" class="row"></div><div id="metrics" class="grid" style="margin-top:12px"></div></div>
 <div class="card"><h3>Positions</h3><pre id="positions">Not connected.</pre></div>
 <div class="card"><h3>Recent executions</h3><pre id="executions">Not connected.</pre></div>
+<div class="card">
+  <h3>Strategy Lab</h3>
+  <p class="muted">Backtests candidate strategies on historical Alpaca bars with a chronological holdout and stressed transaction costs.</p>
+  <div class="row"><button onclick="labAction('start')">Run Strategy Lab</button><button onclick="labAction('stop')">Stop Lab</button><button onclick="loadLab()">Refresh Lab</button></div>
+  <pre id="lab">Not run yet.</pre>
+</div>
 <div class="card"><h3>Raw status</h3><pre id="raw"></pre></div>
 <script>
 const token=()=>document.getElementById('token').value;
@@ -145,6 +182,14 @@ async function loadStatus(){
  }catch(e){alert(e.message)}
 }
 async function action(x){try{await api(x,'POST');await loadStatus()}catch(e){alert(e.message)}}
-setInterval(()=>{if(token()) loadStatus()},15000);
+async function loadLab(){
+ try{
+  const s=await api('lab/status');
+  const r=await api('lab/results');
+  document.getElementById('lab').textContent=JSON.stringify({state:s,results:r.results},null,2);
+ }catch(e){document.getElementById('lab').textContent='Lab error: '+e.message}
+}
+async function labAction(x){try{await api('lab/'+x,'POST');await loadLab()}catch(e){alert(e.message)}}
+setInterval(()=>{if(token()){loadStatus();loadLab()}},15000);
 </script>
 </body></html>'''

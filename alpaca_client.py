@@ -14,7 +14,7 @@ class AlpacaError(RuntimeError):
 class AlpacaClient:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self._client = httpx.AsyncClient(timeout=15.0)
+        self._client = httpx.AsyncClient(timeout=30.0)
 
     @property
     def headers(self) -> Dict[str, str]:
@@ -89,3 +89,39 @@ class AlpacaClient:
             items.sort(key=lambda x: x.get("t", ""))
             normalized[symbol] = items
         return normalized
+
+    async def historical_bars(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        timeframe: str = "5Min",
+        max_bars: int = 5000,
+    ) -> List[dict]:
+        """Fetch chronologically ordered historical bars with Alpaca pagination."""
+        url = f"{self.settings.data_base_url}/v2/stocks/{symbol}/bars"
+        page_token: Optional[str] = None
+        bars: List[dict] = []
+
+        while len(bars) < max_bars:
+            params = {
+                "timeframe": timeframe,
+                "start": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "end": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "limit": min(10000, max_bars - len(bars)),
+                "adjustment": "raw",
+                "feed": self.settings.data_feed,
+                "sort": "asc",
+            }
+            if page_token:
+                params["page_token"] = page_token
+
+            data = await self._request("GET", url, params=params)
+            page = list((data or {}).get("bars", []))
+            bars.extend(page)
+            page_token = (data or {}).get("next_page_token")
+            if not page_token or not page:
+                break
+
+        bars.sort(key=lambda x: x.get("t", ""))
+        return bars[:max_bars]

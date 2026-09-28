@@ -78,3 +78,17 @@ Protected calls use `Authorization: Bearer <DASHBOARD_TOKEN>`.
 ## Next engineering upgrades
 
 For serious evaluation, add persistent PostgreSQL execution logging, theoretical-vs-fill slippage tracking, bid/ask spread filters, websocket quotes/trade updates, strategy backtesting, and a dedicated order-state machine.
+
+## Strategy Lab
+
+MicroTrader v0.2 adds a protected Strategy Lab for research before paper/live execution.
+
+- 10 initial candidate configurations across momentum and mean-reversion families.
+- Chronological 70/30 train/out-of-sample split.
+- Next-bar-open fills to avoid same-bar look-ahead.
+- Configurable round-trip transaction-cost assumptions.
+- A stressed-cost pass with a higher friction assumption.
+- Automatic rejection when out-of-sample expectancy is non-positive, trade count is too small, profit factor is weak, drawdown is excessive, or the stressed-cost result fails.
+- The lab does **not** automatically enable live trading or promote a result into the live engine.
+
+Dashboard controls are available under **Strategy Lab**. API endpoints: `GET /api/lab/status`, `GET /api/lab/results`, `POST /api/lab/start`, and `POST /api/lab/stop`.

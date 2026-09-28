@@ -46,9 +46,24 @@ class Settings:
 
     data_feed: str = os.getenv("ALPACA_DATA_FEED", "iex")
 
+    lab_symbols_raw: str = os.getenv(
+        "LAB_SYMBOLS",
+        "SPY,QQQ,AAPL,MSFT,NVDA,AMD,AMZN,META,GOOGL,TSLA"
+    )
+    lab_lookback_days: int = _int("LAB_LOOKBACK_DAYS", 60)
+    lab_timeframe: str = os.getenv("LAB_TIMEFRAME", "5Min")
+    lab_max_bars_per_symbol: int = _int("LAB_MAX_BARS_PER_SYMBOL", 5000)
+    lab_cost_bps: float = _float("LAB_COST_BPS", 2.5)
+    lab_stress_cost_multiplier: float = _float("LAB_STRESS_COST_MULTIPLIER", 2.0)
+    lab_min_oos_trades: int = _int("LAB_MIN_OOS_TRADES", 30)
+
     @property
     def symbols(self) -> List[str]:
         return [s.strip().upper() for s in self.symbols_raw.split(",") if s.strip()]
+
+    @property
+    def lab_symbols(self) -> List[str]:
+        return [s.strip().upper() for s in self.lab_symbols_raw.split(",") if s.strip()]
 
     @property
     def trading_base_url(self) -> str:
