@@ -100,6 +100,8 @@ class ResearchCoordinator:
             f"Pausing stock discovery to run full research validation on "
             f"{self.state.queued_strategy} ({self.state.queued_stage})."
         )
+        log.info("Coordinator validation start: strategy=%s stage=%s signature=%s",
+                 self.state.queued_strategy, self.state.queued_stage, sig[:12])
         await self.lab.pause(self.state.message)
         self.state.validations_started += 1
         try:
@@ -119,8 +121,11 @@ class ResearchCoordinator:
             self.state.last_validation_signature = sig
             self.state.last_validation_at = datetime.now(timezone.utc).isoformat()
             self.state.message = "Validation completed; stock discovery resumed."
+            log.info("Coordinator validation complete: strategy=%s signature=%s",
+                     self.state.queued_strategy, sig[:12])
         finally:
             await self.lab.resume()
+            log.info("Coordinator resumed Strategy Lab")
             self.state.mode = "discovery"
             self.state.queued_signature = ""
             self.state.queued_strategy = ""
