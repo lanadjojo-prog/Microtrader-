@@ -137,11 +137,13 @@ class StrategyLab:
                 self.state.generation += 1
                 self.state.progress = 0
                 self.state.total = batch_size
-                self.state.message = (
-                    f"Generation {self.state.generation}: testing next {batch_size} candidates"
-                )
-
                 batch = choose_batch(results, seen, self.state.generation, batch_size)
+                phase = str(batch[0].params.get("_phase", "discovery")) if batch else "discovery"
+                self.state.stage = phase
+                self.state.total = len(batch)
+                self.state.message = (
+                    f"{phase.replace('_',' ').title()}: testing {len(batch)} candidates"
+                )
                 if not batch:
                     self.state.stage = "completed"
                     self.state.message = "No new discovery/incubator/deep-search candidates available"
@@ -174,15 +176,16 @@ class StrategyLab:
                     self.state.tested_total += 1
                     self.state.promoted_total = len(promoted)
                     self.state.message = (
-                        f"Generation {self.state.generation}: {idx}/{batch_size} tested · "
+                        f"{phase.replace('_',' ').title()}: {idx}/{len(batch)} tested · "
                         f"{len(promoted)}/{self.settings.lab_target_promoted} promoted"
                     )
 
+                    stage_rank = {"promoted": 4, "deep_search": 3, "incubator": 2, "rejected": 1}
                     results.sort(
                         key=lambda row: (
-                            bool(row["promoted"]),
+                            stage_rank.get(row.get("funnel_stage", "rejected"), 0),
+                            float(row.get("funnel_score", 0)),
                             row["oos"]["expectancy_bps"],
-                            row["oos"]["profit_factor"],
                         ),
                         reverse=True,
                     )
