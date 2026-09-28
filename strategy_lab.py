@@ -262,74 +262,130 @@ def candidate_signature(candidate: Candidate) -> str:
     return candidate.strategy + ":" + json.dumps(candidate.params, sort_keys=True, separators=(",", ":"))
 
 
+def discovery_candidates() -> List[Candidate]:
+    out: List[Candidate] = []
+    for tf in (1, 3, 5, 15):
+        common = {"timeframe_min": tf, "_phase": "discovery"}
+        out.extend([
+            Candidate("momentum", {**common, "fast": 4, "slow": 16, "entry_bps": 8.0, "max_hold": 16}),
+            Candidate("mean_reversion", {**common, "window": 20, "z_entry": 1.5, "z_exit": 0.25, "max_hold": 20}),
+            Candidate("breakout", {**common, "window": 20, "buffer_bps": 3.0, "max_hold": 24}),
+            Candidate("extreme_reversal", {**common, "window": 12, "shock_z": 2.0, "max_hold": 12}),
+            Candidate("volatility_breakout", {**common, "window": 20, "vol_mult": 1.6, "max_hold": 20}),
+            Candidate("trend_pullback", {**common, "fast": 8, "slow": 30, "pullback_z": 1.0, "max_hold": 24}),
+            Candidate("vwap_reversion", {**common, "window": 60, "z_entry": 1.5, "max_hold": 20}),
+            Candidate("vwap_momentum", {**common, "window": 60, "buffer_bps": 8.0, "max_hold": 20}),
+            Candidate("asymmetric_breakout", {**common, "window": 20, "stop_atr": 0.7, "target_r": 3.0, "max_hold": 40}),
+            Candidate("asymmetric_breakout", {**common, "window": 20, "stop_atr": 0.6, "target_r": 5.0, "max_hold": 60}),
+            Candidate("asymmetric_breakout", {**common, "window": 40, "stop_atr": 0.5, "target_r": 8.0, "max_hold": 90}),
+        ])
+    return out
+
+
+def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candidate]:
+    strategy = str(row.get("strategy"))
+    base = dict(row.get("params") or {})
+    base["_phase"] = phase
+    out: List[Candidate] = []
+    multipliers = (0.75, 1.0, 1.25) if phase == "incubator" else (0.9, 1.0, 1.1)
+    keys = [
+        k for k, v in base.items()
+        if isinstance(v, (int, float)) and k not in {"timeframe_min", "target_r"}
+    ][:3]
+    for key in keys:
+        for mult in multipliers:
+            q = dict(base)
+            v = base[key]
+            nv = v * mult * (1.0 + (0.02 * generation if phase == "deep_search" else 0.0))
+            q[key] = max(1, int(round(nv))) if isinstance(v, int) else round(max(0.01, nv), 4)
+            q["_phase"] = phase
+            out.append(Candidate(strategy, q))
+    if strategy == "asymmetric_breakout":
+        for r in (2.0, 3.0, 5.0, 8.0, 10.0):
+            q = dict(base)
+            q["target_r"] = r
+            q["_phase"] = phase
+            out.append(Candidate(strategy, q))
+    return out
+
+
+def choose_batch(results: List[dict], seen: set[str], generation: int, batch_size: int) -> List[Candidate]:
+    pending_discovery = [
+        c for c in discovery_candidates()
+        if candidate_signature(c) not in seen
+    ]
+    if pending_discovery:
+        return pending_discovery[:batch_size]
+
+    promising = [
+        r for r in results
+        if r.get("funnel_stage") in {"incubator", "deep_search", "promoted"}
+        and r.get("params", {}).get("_phase") in {"discovery", "incubator", "deep_search"}
+    ]
+    promising.sort(key=lambda r: float(r.get("funnel_score", 0)), reverse=True)
+
+    phase = "incubator" if any(r.get("params", {}).get("_phase") == "discovery" for r in promising[:12]) else "deep_search"
+    candidates: List[Candidate] = []
+    for row in promising[:12]:
+        candidates.extend(parameter_variants(row, phase, generation))
+
+    unique = []
+    local = set()
+    for cand in candidates:
+        sig = candidate_signature(cand)
+        if sig in seen or sig in local:
+            continue
+        local.add(sig)
+        unique.append(cand)
+        if len(unique) >= batch_size:
+            return unique
+
+    # If nothing has shown promise, broaden Discovery instead of endlessly tuning weak families.
+    for tf in (1, 3, 5, 15):
+        g = max(1, generation)
+        broad = [
+            Candidate("breakout", {"timeframe_min": tf, "_phase": "discovery", "window": 10 + 5*g, "buffer_bps": 2.0 + g, "max_hold": 12 + 4*g}),
+            Candidate("extreme_reversal", {"timeframe_min": tf, "_phase": "discovery", "window": 8 + 2*g, "shock_z": 1.5 + 0.15*g, "max_hold": 8 + 2*g}),
+            Candidate("volatility_breakout", {"timeframe_min": tf, "_phase": "discovery", "window": 12 + 3*g, "vol_mult": 1.2 + 0.1*g, "max_hold": 12 + 3*g}),
+            Candidate("asymmetric_breakout", {"timeframe_min": tf, "_phase": "discovery", "window": 15 + 5*g, "stop_atr": 0.5 + 0.05*g, "target_r": 5.0, "max_hold": 40 + 5*g}),
+        ]
+        for cand in broad:
+            sig = candidate_signature(cand)
+            if sig not in seen and sig not in local:
+                local.add(sig); unique.append(cand)
+                if len(unique) >= batch_size:
+                    return unique
+    return unique
+
+
 def candidate_stream():
-    """Yield an open-ended, deterministic stream of unique parameter combinations."""
-    generation = 0
-    while True:
-        generation += 1
-
-        # Momentum: gradually widen the search instead of random data-mining.
-        slow_values = [10 + generation, 14 + generation * 2, 20 + generation * 3, 30 + generation * 4]
-        for slow in slow_values:
-            fast_values = sorted({2, 3, 4, 5, max(2, slow // 4), max(2, slow // 3)})
-            for fast in fast_values:
-                if fast >= slow:
-                    continue
-                for entry_bps in (3.0, 5.0, 8.0, 12.0, 18.0, 25.0):
-                    for hold in (6, 12, 18, 24, 36, 48):
-                        yield Candidate("momentum", {
-                            "fast": fast,
-                            "slow": slow,
-                            "entry_bps": entry_bps,
-                            "max_hold": hold,
-                        })
-
-        # Mean reversion: widen lookback and entry strictness gradually.
-        windows = [8 + generation, 12 + generation * 2, 20 + generation * 3, 30 + generation * 4]
-        for window in windows:
-            for z_entry in (0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25):
-                for z_exit in (0.0, 0.15, 0.30, 0.50):
-                    if z_exit >= z_entry:
-                        continue
-                    for hold in (6, 12, 18, 24, 36, 48):
-                        yield Candidate("mean_reversion", {
-                            "window": window,
-                            "z_entry": z_entry,
-                            "z_exit": z_exit,
-                            "max_hold": hold,
-                        })
+    for c in discovery_candidates():
+        yield c
 
 
 def candidate_grid() -> List[Candidate]:
-    candidates: List[Candidate] = []
-    for fast, slow, entry, hold in [
-        (3, 10, 5.0, 12),
-        (4, 12, 8.0, 15),
-        (5, 20, 8.0, 20),
-        (8, 24, 10.0, 24),
-        (10, 30, 12.0, 30),
-    ]:
-        candidates.append(Candidate("momentum", {
-            "fast": fast,
-            "slow": slow,
-            "entry_bps": entry,
-            "max_hold": hold,
-        }))
+    return discovery_candidates()
 
-    for window, z_entry, z_exit, hold in [
-        (10, 1.0, 0.15, 12),
-        (15, 1.25, 0.20, 18),
-        (20, 1.5, 0.25, 24),
-        (30, 1.5, 0.25, 30),
-        (40, 1.75, 0.30, 36),
-    ]:
-        candidates.append(Candidate("mean_reversion", {
-            "window": window,
-            "z_entry": z_entry,
-            "z_exit": z_exit,
-            "max_hold": hold,
-        }))
-    return candidates
+
+def aggregate_bars(bars: List[dict], minutes: int) -> List[dict]:
+    if minutes <= 1:
+        return list(bars)
+    out: List[dict] = []
+    bucket: List[dict] = []
+    for bar in bars:
+        bucket.append(bar)
+        if len(bucket) < minutes:
+            continue
+        out.append({
+            "t": bucket[-1].get("t"),
+            "o": float(bucket[0]["o"]),
+            "h": max(float(x["h"]) for x in bucket),
+            "l": min(float(x["l"]) for x in bucket),
+            "c": float(bucket[-1]["c"]),
+            "v": sum(float(x.get("v") or 0) for x in bucket),
+        })
+        bucket = []
+    return out
 
 
 def evaluate_candidate(
