@@ -110,6 +110,80 @@ class StrategyStore:
             )
             await conn.commit()
 
+    async def save_checkpoint(
+        self,
+        signature: str,
+        result: Dict[str, Any],
+        generation: int,
+        tested_total: int,
+        promoted_total: int,
+    ) -> None:
+        """Persist one evaluated candidate and the matching counter atomically.
+
+        A short connect timeout prevents a slow database/pooler from freezing the
+        entire research loop.
+        """
+        if not self.enabled:
+            return
+        async with await psycopg.AsyncConnection.connect(
+            self.database_url, connect_timeout=5
+        ) as conn:
+            await conn.execute(
+                """
+                INSERT INTO microtrader_strategy_results (
+                    signature, strategy, params, promoted, rejection_reasons,
+                    train, oos, stress_oos, positive_symbol_ratio,
+                    positive_symbols, symbol_count, per_symbol,
+                    family, funnel_stage, funnel_score, tested_at
+                ) VALUES (
+                    %s, %s, %s::jsonb, %s, %s::jsonb,
+                    %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                    %s, %s, %s::jsonb,
+                    %s, %s, %s, NOW()
+                )
+                ON CONFLICT (signature) DO UPDATE SET
+                    promoted = EXCLUDED.promoted,
+                    rejection_reasons = EXCLUDED.rejection_reasons,
+                    train = EXCLUDED.train,
+                    oos = EXCLUDED.oos,
+                    stress_oos = EXCLUDED.stress_oos,
+                    positive_symbol_ratio = EXCLUDED.positive_symbol_ratio,
+                    positive_symbols = EXCLUDED.positive_symbols,
+                    symbol_count = EXCLUDED.symbol_count,
+                    per_symbol = EXCLUDED.per_symbol,
+                    family = EXCLUDED.family,
+                    funnel_stage = EXCLUDED.funnel_stage,
+                    funnel_score = EXCLUDED.funnel_score,
+                    tested_at = NOW()
+                """,
+                (
+                    signature,
+                    result["strategy"],
+                    json.dumps(result["params"]),
+                    bool(result["promoted"]),
+                    json.dumps(result.get("rejection_reasons", [])),
+                    json.dumps(result.get("train", {})),
+                    json.dumps(result.get("oos", {})),
+                    json.dumps(result.get("stress_oos", {})),
+                    result.get("positive_symbol_ratio"),
+                    result.get("positive_symbols"),
+                    result.get("symbol_count"),
+                    json.dumps(result.get("per_symbol", {})),
+                    result.get("family"),
+                    result.get("funnel_stage"),
+                    result.get("funnel_score"),
+                ),
+            )
+            await conn.execute(
+                """
+                UPDATE microtrader_strategy_state
+                SET generation=%s, tested_total=%s, promoted_total=%s, updated_at=NOW()
+                WHERE id=1
+                """,
+                (generation, tested_total, promoted_total),
+            )
+            await conn.commit()
+
     async def save_state(self, generation: int, tested_total: int, promoted_total: int) -> None:
         if not self.enabled:
             return
