@@ -86,6 +86,7 @@ class Settings:
     crypto_lab_flow_window_seconds: int = _int("CRYPTO_LAB_FLOW_WINDOW_SECONDS", 30)
     crypto_lab_flow_threshold: float = _float("CRYPTO_LAB_FLOW_THRESHOLD", 0.35)
     crypto_lab_book_threshold: float = _float("CRYPTO_LAB_BOOK_THRESHOLD", 0.20)
+    crypto_lab_process_interval_ms: int = _int("CRYPTO_LAB_PROCESS_INTERVAL_MS", 500)
 
     @property
     def symbols(self) -> List[str]:
