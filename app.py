@@ -188,9 +188,22 @@ async function loadStatus(){
   document.getElementById('positions').textContent=JSON.stringify(s.positions||[],null,2);
   const ex=await api('executions'); document.getElementById('executions').textContent=JSON.stringify(ex.executions||[],null,2);
   document.getElementById('raw').textContent=JSON.stringify(s,null,2);
- }catch(e){alert(e.message)}
+ }catch(e){
+  const msg=e.message==='Unauthorized'
+    ? 'Dashboard token ontbreekt of is ongeldig.'
+    : e.message;
+  document.getElementById('raw').textContent=msg;
+ }
 }
-async function action(x){try{await api(x,'POST');await loadStatus()}catch(e){alert(e.message)}}
+async function action(x){
+ try{await api(x,'POST');await loadStatus()}
+ catch(e){
+  const msg=e.message==='Unauthorized'
+    ? 'Dashboard token ontbreekt of is ongeldig.'
+    : e.message;
+  document.getElementById('raw').textContent=msg;
+ }
+}
 function fmt(v,d=2){return (v===null||v===undefined)?'-':Number(v).toFixed(d)}
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 function renderLab(s,results){
@@ -234,7 +247,15 @@ async function loadLab(manual=false){
   document.getElementById('labMessage').textContent='Lab error: '+e.message;
  }
 }
-async function labAction(x){try{await api('lab/'+x,'POST');await loadLab(true)}catch(e){alert(e.message)}}
+async function labAction(x){
+ try{await api('lab/'+x,'POST');await loadLab(true)}
+ catch(e){
+  const msg=e.message==='Unauthorized'
+    ? 'Dashboard token ontbreekt of is ongeldig.'
+    : e.message;
+  document.getElementById('labMessage').textContent=msg;
+ }
+}
 setInterval(()=>{if(token()){loadStatus();loadLab()}},5000);
 </script>
 </body></html>'''
