@@ -156,15 +156,16 @@ class StrategyLab:
                         s: aggregate_bars(v, int(candidate.params.get("timeframe_min", 1)))
                         for s, v in bars_by_symbol.items()
                     }
-                    result = evaluate_candidate(
+                    result = await asyncio.to_thread(
+                        evaluate_candidate,
                         candidate,
                         candidate_bars,
-                        cost_bps=self.settings.lab_cost_bps,
-                        stress_cost_multiplier=self.settings.lab_stress_cost_multiplier,
-                        min_oos_trades=self.settings.lab_min_oos_trades,
-                        min_profit_factor=self.settings.lab_min_profit_factor,
-                        max_drawdown_pct=self.settings.lab_max_drawdown_pct,
-                        min_positive_symbol_ratio=self.settings.lab_min_positive_symbol_ratio,
+                        self.settings.lab_cost_bps,
+                        self.settings.lab_stress_cost_multiplier,
+                        self.settings.lab_min_oos_trades,
+                        self.settings.lab_min_profit_factor,
+                        self.settings.lab_max_drawdown_pct,
+                        self.settings.lab_min_positive_symbol_ratio,
                     )
                     results.append(result)
                     signature = candidate_signature(candidate)
