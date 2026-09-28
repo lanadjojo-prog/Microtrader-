@@ -202,14 +202,15 @@ DASHBOARD = r'''<!doctype html>
 <title>MicroTrader</title>
 <style>
 body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9eef5;margin:0;padding:28px;max-width:1100px;margin:auto}
-.card{background:#171c24;border:1px solid #2a3442;border-radius:16px;padding:18px;margin:14px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}button,input{font:inherit;border-radius:10px;border:1px solid #3a4658;padding:10px 13px;background:#0f141b;color:#fff}button{cursor:pointer}button.danger{border-color:#8a3841}.muted{color:#96a4b5}pre{white-space:pre-wrap;word-break:break-word}h1{margin-bottom:0}.pill{padding:5px 9px;border-radius:999px;background:#242d39}.pill.good{background:#17351f}.pill.bad{background:#3a1c22}.pill.run{background:#17314a}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}.metric{background:#111720;padding:12px;border-radius:12px}.metric b{display:block;font-size:1.3rem;margin-top:4px}.progress{height:12px;background:#0f141b;border:1px solid #2a3442;border-radius:999px;overflow:hidden;margin:12px 0}.progress>div{height:100%;background:#e9eef5;width:0%;transition:width .25s ease}.lab-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.lab-table{width:100%;border-collapse:collapse;margin-top:14px;font-size:.92rem}.lab-table th,.lab-table td{text-align:left;padding:9px 8px;border-bottom:1px solid #2a3442;vertical-align:top}.lab-table th{color:#96a4b5;font-weight:600}.ok{color:#8de39e}.no{color:#ff9da8}.small{font-size:.85rem}.scroll{overflow-x:auto}.overview{position:sticky;top:8px;z-index:20;background:#171c24ee;backdrop-filter:blur(8px)}.lab-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:12px}.lab-mini{background:#111720;border:1px solid #2a3442;border-radius:12px;padding:12px}.lab-mini b{display:block;margin-bottom:6px}.lab-mini .state{font-size:.8rem;font-weight:700}.state.done{color:#8de39e}.state.running{color:#8ecbff}.state.waiting{color:#96a4b5}.state.error{color:#ff9da8}details{margin-top:12px}summary{cursor:pointer;color:#96a4b5}</style>
+.card{background:#171c24;border:1px solid #2a3442;border-radius:16px;padding:18px;margin:14px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}button,input{font:inherit;border-radius:10px;border:1px solid #3a4658;padding:10px 13px;background:#0f141b;color:#fff}button{cursor:pointer}button.danger{border-color:#8a3841}.muted{color:#96a4b5}pre{white-space:pre-wrap;word-break:break-word}h1{margin-bottom:0}.pill{padding:5px 9px;border-radius:999px;background:#242d39}.pill.good{background:#17351f}.pill.bad{background:#3a1c22}.pill.run{background:#17314a}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}.metric{background:#111720;padding:12px;border-radius:12px}.metric b{display:block;font-size:1.3rem;margin-top:4px}.progress{height:12px;background:#0f141b;border:1px solid #2a3442;border-radius:999px;overflow:hidden;margin:12px 0}.progress>div{height:100%;background:#e9eef5;width:0%;transition:width .25s ease}.lab-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.lab-table{width:100%;border-collapse:collapse;margin-top:14px;font-size:.92rem}.lab-table th,.lab-table td{text-align:left;padding:9px 8px;border-bottom:1px solid #2a3442;vertical-align:top}.lab-table th{color:#96a4b5;font-weight:600}.ok{color:#8de39e}.no{color:#ff9da8}.small{font-size:.85rem}.scroll{overflow-x:auto}.overview{position:sticky;top:8px;z-index:20;background:#171c24ee;backdrop-filter:blur(8px)}.lab-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:12px}.lab-mini{background:#111720;border:1px solid #2a3442;border-radius:12px;padding:12px}.lab-mini b{display:block;margin-bottom:6px}.lab-mini .state{font-size:.8rem;font-weight:700}.state.done{color:#8de39e}.state.running{color:#8ecbff}.state.waiting{color:#96a4b5}.state.error{color:#ff9da8}details{margin-top:12px}summary{cursor:pointer;color:#96a4b5}.nav{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}.nav a{color:#dbe7f5;text-decoration:none;background:#111720;border:1px solid #2a3442;padding:9px 12px;border-radius:10px}.section-title{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.mode-banner{padding:10px 12px;border-radius:12px;background:#132318;border:1px solid #275335;color:#a7e6b3;margin:10px 0}.signal-on{color:#8de39e;font-weight:700}.signal-off{color:#738195}.crypto-card{background:#111720;border:1px solid #2a3442;border-radius:12px;padding:14px}.crypto-market{font-size:1.05rem;font-weight:700;margin-bottom:8px}</style>
 </head>
 <body>
-<h1>MicroTrader</h1><p class="muted">Alpaca micro-trading engine · safe-by-default</p>
+<h1>MicroTrader</h1><p class="muted">Trading + research dashboard · safe-by-default</p>
+<div class="nav"><a href="#engine">Trading Engine</a><a href="#stock-lab">Stock Lab</a><a href="#crypto-lab">Crypto Lab</a><a href="#research-labs">Research Labs</a></div>
 <div class="card">
   <div class="row"><input id="token" type="password" placeholder="Dashboard token" style="min-width:260px"><button onclick="loadStatus()">Connect</button><button onclick="action('start')">Start</button><button onclick="action('stop')">Stop</button><button class="danger" onclick="action('flatten')">Flatten</button></div>
 </div>
-<div class="card overview">
+<div class="card overview" id="engine">
   <h3 style="margin-top:0">Live Overview</h3>
   <div id="overallStatus" class="row"><span class="muted">Connecting…</span></div>
   <div id="overallMetrics" class="grid" style="margin-top:12px"></div>
@@ -217,8 +218,8 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 <div class="card"><div id="headline" class="row"></div><div id="metrics" class="grid" style="margin-top:12px"></div></div>
 <div class="card"><h3>Positions</h3><pre id="positions">Not connected.</pre></div>
 <div class="card"><h3>Recent executions</h3><pre id="executions">Not connected.</pre></div>
-<div class="card">
-  <h3>Strategy Lab</h3>
+<div class="card" id="stock-lab">
+  <div class="section-title"><h3>Stock Strategy Lab</h3><span class="pill">ALPACA · RESEARCH</span></div>
   <p class="muted">Backtests candidate strategies on historical Alpaca bars with a chronological holdout and stressed transaction costs.</p>
   <div class="row"><button onclick="labAction('start')">Run Strategy Lab</button><button onclick="labAction('stop')">Stop Lab</button><button onclick="loadLab(true)">Refresh Lab</button></div>
   <div class="lab-head" style="margin-top:14px">
@@ -230,7 +231,18 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
   <div id="labMetrics" class="grid" style="margin-top:12px"></div>
   <div id="labResults" class="scroll"></div>
 </div>
-<div class="card">
+<div class="card" id="crypto-lab">
+  <div class="section-title"><h3>Crypto / Microstructure Lab</h3><span class="pill good">SIMULATION ONLY</span></div>
+  <div class="mode-banner"><b>Geen echt geld.</b> Dit lab leest alleen publieke Bitvavo marktdata en plaatst geen orders.</div>
+  <p class="muted">Vergelijkt mean reversion, spread/micro-market-making, order-book imbalance en een hybride signaal op live top-of-book data.</p>
+  <div class="row"><button onclick="cryptoAction('start')">Start Crypto Lab</button><button onclick="cryptoAction('stop')">Stop Crypto Lab</button><button onclick="loadCrypto()">Refresh</button></div>
+  <div id="cryptoStatus" class="row" style="margin-top:14px"><span class="pill">IDLE</span></div>
+  <div id="cryptoMessage" class="muted" style="margin-top:8px">Nog niet gestart.</div>
+  <div id="cryptoMetrics" class="grid" style="margin-top:12px"></div>
+  <div id="cryptoMarkets" class="lab-grid"></div>
+  <details><summary>Strategiestatistieken / technische details</summary><pre id="cryptoRaw" class="small">Not loaded.</pre></details>
+</div>
+<div class="card" id="research-labs">
   <h3>Research Labs</h3>
   <p class="muted">17 specialised labs for robustness, sizing, compounding, risk and aggressive-growth research.</p>
   <div class="row"><button onclick="researchAction('start')">Run Research Labs</button><button onclick="researchAction('stop')">Stop Research Labs</button><button onclick="loadResearch()">Refresh</button></div>
