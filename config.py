@@ -67,6 +67,15 @@ class Settings:
     research_auto_start: bool = _bool("RESEARCH_AUTO_START", True)
     research_interval_seconds: int = _int("RESEARCH_INTERVAL_SECONDS", 21600)
 
+    # Crypto / microstructure lab (public Bitvavo data, simulation-only)
+    crypto_lab_auto_start: bool = _bool("CRYPTO_LAB_AUTO_START", False)
+    crypto_lab_symbols_raw: str = os.getenv("CRYPTO_LAB_SYMBOLS", "BTC-EUR,ETH-EUR,SOL-EUR")
+    crypto_lab_poll_seconds: int = _int("CRYPTO_LAB_POLL_SECONDS", 3)
+    crypto_lab_window: int = _int("CRYPTO_LAB_WINDOW", 40)
+    crypto_lab_maker_fee_bps: float = _float("CRYPTO_LAB_MAKER_FEE_BPS", 15.0)
+    crypto_lab_z_entry: float = _float("CRYPTO_LAB_Z_ENTRY", 1.5)
+    crypto_lab_imbalance_threshold: float = _float("CRYPTO_LAB_IMBALANCE_THRESHOLD", 0.35)
+
     @property
     def symbols(self) -> List[str]:
         return [s.strip().upper() for s in self.symbols_raw.split(",") if s.strip()]
@@ -74,6 +83,10 @@ class Settings:
     @property
     def lab_symbols(self) -> List[str]:
         return [s.strip().upper() for s in self.lab_symbols_raw.split(",") if s.strip()]
+
+    @property
+    def crypto_lab_symbols(self) -> List[str]:
+        return [s.strip().upper() for s in self.crypto_lab_symbols_raw.split(",") if s.strip()]
 
     @property
     def trading_base_url(self) -> str:
