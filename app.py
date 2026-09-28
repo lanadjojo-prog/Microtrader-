@@ -322,7 +322,7 @@ async function loadLab(manual=false){
   const [s,r]=await Promise.all([api('lab/status'),api('lab/results')]);
   renderLab(s,r.results||[]);
   lastStrategyState=s;
-  updateOverview(lastStrategyState,lastResearchState);
+  updateOverview(lastStrategyState,lastResearchState,lastCryptoState);
  }catch(e){
   document.getElementById('labMessage').textContent='Lab error: '+e.message;
  }
@@ -336,23 +336,67 @@ async function labAction(x){
   document.getElementById('labMessage').textContent=msg;
  }
 }
+async function loadCrypto(){
+ try{
+  const s=await api('crypto-lab/status');
+  lastCryptoState=s;
+  const cls=s.running?'run':(s.last_error?'bad':((s.observations||0)>0?'good':''));
+  const label=s.running?'COLLECTING':(s.last_error?'ERROR':((s.observations||0)>0?'PAUSED':'IDLE'));
+  document.getElementById('cryptoStatus').innerHTML=
+    '<span class="pill '+cls+'">'+label+'</span>'+
+    '<span class="pill good">NO LIVE ORDERS</span>'+
+    '<span class="muted small">'+esc(s.venue||'')+'</span>';
+  document.getElementById('cryptoMessage').textContent=s.message||'';
+  const vals={
+    'Markets':(s.markets||[]).length+'/'+(s.symbols||[]).length,
+    'Observations':s.observations||0,
+    'Cycles':s.cycles||0,
+    'Polling':(s.poll_seconds||'-')+' sec',
+    'Maker fee assumption':fmt(s.maker_fee_bps_one_way,1)+' bps / side',
+    'Last update':s.last_update?new Date(s.last_update).toLocaleTimeString():'-'
+  };
+  document.getElementById('cryptoMetrics').innerHTML=Object.entries(vals).map(function(kv){
+    return '<div class="metric"><span class="muted">'+esc(kv[0])+'</span><b>'+esc(kv[1])+'</b></div>';
+  }).join('');
+  const markets=s.markets||[];
+  document.getElementById('cryptoMarkets').innerHTML=markets.length?markets.map(function(m){
+    function sig(on,label){return '<span class="'+(on?'signal-on':'signal-off')+'">'+(on?'●':'○')+' '+label+'</span>';}
+    return '<div class="crypto-card">'+
+      '<div class="crypto-market">'+esc(m.market)+'</div>'+
+      '<div class="small muted">Mid €'+fmt(m.mid,2)+' · Spread '+fmt(m.spread_bps,2)+' bps</div>'+
+      '<div class="small muted">Z-score '+fmt(m.zscore,2)+' · Imbalance '+fmt(m.imbalance,2)+'</div>'+
+      '<div class="small" style="margin-top:8px">'+sig(m.mean_reversion_signal,'Mean reversion')+'<br>'+sig(m.market_maker_signal,'Maker spread')+'<br>'+sig(m.imbalance_signal,'Order-book imbalance')+'<br>'+sig(m.hybrid_signal,'Hybrid')+'</div>'+
+    '</div>';
+  }).join(''):'<p class="muted">Start het lab om live marktdata te verzamelen.</p>';
+  document.getElementById('cryptoRaw').textContent=JSON.stringify({strategy_stats:s.strategy_stats,markets:s.markets},null,2);
+  updateOverview(lastStrategyState,lastResearchState,lastCryptoState);
+ }catch(e){
+  document.getElementById('cryptoMessage').textContent=e.message==='Unauthorized'?'Dashboard token ontbreekt of is ongeldig.':e.message;
+ }
+}
+async function cryptoAction(x){
+ try{await api('crypto-lab/'+x,'POST');await loadCrypto()}
+ catch(e){document.getElementById('cryptoMessage').textContent=e.message}
+}
 const researchNames=['market','session','regime','high_frequency','walk_forward','parameter_stability','cost_stress','monte_carlo','position_sizing','compounding','leverage','risk_of_ruin','recovery','portfolio','capital_allocation','aggressive_growth','master'];
 function prettyLabName(x){return String(x||'').split('_').map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(' ')}
-function updateOverview(strategyState,researchState){
- const strategyRunning=!!strategyState?.running, researchRunning=!!researchState?.running;
+function updateOverview(strategyState,researchState,cryptoState){
+ const strategyRunning=!!strategyState?.running, researchRunning=!!researchState?.running, cryptoRunning=!!cryptoState?.running;
  document.getElementById('overallStatus').innerHTML=
    `<span class="pill ${strategyRunning?'run':'good'}">Strategy Lab: ${strategyRunning?'RUNNING':'STOPPED'}</span>`+
    `<span class="pill ${researchRunning?'run':'good'}">Research Labs: ${researchRunning?'RUNNING':'STOPPED'}</span>`+
+   `<span class="pill ${cryptoRunning?'run':'good'}">Crypto Lab: ${cryptoRunning?'COLLECTING':'STOPPED'}</span>`+
    (researchState?.current_lab?`<span class="muted">Current: ${esc(prettyLabName(researchState.current_lab))}</span>`:'');
  const vals={
    'Strategies tested':strategyState?.tested_total??'-',
    'Strategies promoted':(strategyState?.promoted_total??0)+'/'+(strategyState?.target_promoted??'-'),
    'Research progress':(researchState?.completed_labs??0)+'/'+(researchState?.total_labs??17),
-   'Active research':researchState?.current_lab?prettyLabName(researchState.current_lab):'-'
+   'Active research':researchState?.current_lab?prettyLabName(researchState.current_lab):'-',
+   'Crypto observations':cryptoState?.observations??'-'
  };
  document.getElementById('overallMetrics').innerHTML=Object.entries(vals).map(([k,v])=>`<div class="metric"><span class="muted">${k}</span><b>${esc(v)}</b></div>`).join('');
 }
-let lastStrategyState=null,lastResearchState=null;
+let lastStrategyState=null,lastResearchState=null,lastCryptoState=null;
 async function loadResearch(){
  try{
   const s=await api('research/status');
@@ -369,7 +413,7 @@ async function loadResearch(){
     return `<div class="lab-mini"><b>${esc(prettyLabName(name))}</b><span class="state ${cls}">${state}</span></div>`;
   }).join('');
   document.getElementById('researchResults').textContent=JSON.stringify(s.labs||{},null,2);
-  updateOverview(lastStrategyState,lastResearchState);
+  updateOverview(lastStrategyState,lastResearchState,lastCryptoState);
  }catch(e){
   document.getElementById('researchResults').textContent=e.message==='Unauthorized'?'Dashboard token ontbreekt of is ongeldig.':e.message;
  }
@@ -378,7 +422,7 @@ async function researchAction(x){try{await api('research/'+x,'POST');await loadR
 const savedToken=sessionStorage.getItem('microtraderDashboardToken')||'';
 document.getElementById('token').value=savedToken;
 document.getElementById('token').addEventListener('input',e=>sessionStorage.setItem('microtraderDashboardToken',e.target.value));
-setInterval(()=>{if(token()){loadStatus();loadLab();loadResearch()}},5000);
-if(token()){loadStatus();loadLab();loadResearch();}
+setInterval(()=>{if(token()){loadStatus();loadLab();loadCrypto();loadResearch()}},5000);
+if(token()){loadStatus();loadLab();loadCrypto();loadResearch();}
 </script>
 </body></html>'''
