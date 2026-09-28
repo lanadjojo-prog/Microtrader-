@@ -69,7 +69,7 @@ class Settings:
 
     # Crypto / microstructure lab (public Bitvavo data, simulation-only)
     crypto_lab_auto_start: bool = _bool("CRYPTO_LAB_AUTO_START", False)
-    crypto_lab_symbols_raw: str = os.getenv("CRYPTO_LAB_SYMBOLS", "BTC-EUR,ETH-EUR,SOL-EUR")
+    crypto_lab_symbols_raw: str = os.getenv("CRYPTO_LAB_SYMBOLS", "BTC-EUR,ETH-EUR,SOL-EUR,BTC-USDC,ETH-USDC,SOL-USDC")
     crypto_lab_poll_seconds: int = _int("CRYPTO_LAB_POLL_SECONDS", 3)
     crypto_lab_window: int = _int("CRYPTO_LAB_WINDOW", 40)
     crypto_lab_maker_fee_bps: float = _float("CRYPTO_LAB_MAKER_FEE_BPS", 15.0)
@@ -79,6 +79,10 @@ class Settings:
     crypto_lab_pending_cycles: int = _int("CRYPTO_LAB_PENDING_CYCLES", 5)
     crypto_lab_max_hold_cycles: int = _int("CRYPTO_LAB_MAX_HOLD_CYCLES", 80)
     crypto_lab_target_edge_bps: float = _float("CRYPTO_LAB_TARGET_EDGE_BPS", 10.0)
+    crypto_lab_book_depth: int = _int("CRYPTO_LAB_BOOK_DEPTH", 20)
+    crypto_lab_flow_window_seconds: int = _int("CRYPTO_LAB_FLOW_WINDOW_SECONDS", 30)
+    crypto_lab_flow_threshold: float = _float("CRYPTO_LAB_FLOW_THRESHOLD", 0.35)
+    crypto_lab_book_threshold: float = _float("CRYPTO_LAB_BOOK_THRESHOLD", 0.20)
 
     @property
     def symbols(self) -> List[str]:
