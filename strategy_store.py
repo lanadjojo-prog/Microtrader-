@@ -110,6 +110,78 @@ class StrategyStore:
             )
             await conn.commit()
 
+    def save_checkpoint_sync(
+        self,
+        signature: str,
+        result: Dict[str, Any],
+        generation: int,
+        tested_total: int,
+        promoted_total: int,
+    ) -> None:
+        """Synchronous checkpoint used from a worker thread.
+
+        Keeping network/DNS/database work off the asyncio event loop prevents
+        dashboard and strategy-search stalls when the remote pooler is slow.
+        """
+        if not self.enabled:
+            return
+        with psycopg.connect(self.database_url, connect_timeout=5) as conn:
+            conn.execute(
+                """
+                INSERT INTO microtrader_strategy_results (
+                    signature, strategy, params, promoted, rejection_reasons,
+                    train, oos, stress_oos, positive_symbol_ratio,
+                    positive_symbols, symbol_count, per_symbol,
+                    family, funnel_stage, funnel_score, tested_at
+                ) VALUES (
+                    %s, %s, %s::jsonb, %s, %s::jsonb,
+                    %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                    %s, %s, %s::jsonb,
+                    %s, %s, %s, NOW()
+                )
+                ON CONFLICT (signature) DO UPDATE SET
+                    promoted = EXCLUDED.promoted,
+                    rejection_reasons = EXCLUDED.rejection_reasons,
+                    train = EXCLUDED.train,
+                    oos = EXCLUDED.oos,
+                    stress_oos = EXCLUDED.stress_oos,
+                    positive_symbol_ratio = EXCLUDED.positive_symbol_ratio,
+                    positive_symbols = EXCLUDED.positive_symbols,
+                    symbol_count = EXCLUDED.symbol_count,
+                    per_symbol = EXCLUDED.per_symbol,
+                    family = EXCLUDED.family,
+                    funnel_stage = EXCLUDED.funnel_stage,
+                    funnel_score = EXCLUDED.funnel_score,
+                    tested_at = NOW()
+                """,
+                (
+                    signature,
+                    result["strategy"],
+                    json.dumps(result["params"]),
+                    bool(result["promoted"]),
+                    json.dumps(result.get("rejection_reasons", [])),
+                    json.dumps(result.get("train", {})),
+                    json.dumps(result.get("oos", {})),
+                    json.dumps(result.get("stress_oos", {})),
+                    result.get("positive_symbol_ratio"),
+                    result.get("positive_symbols"),
+                    result.get("symbol_count"),
+                    json.dumps(result.get("per_symbol", {})),
+                    result.get("family"),
+                    result.get("funnel_stage"),
+                    result.get("funnel_score"),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE microtrader_strategy_state
+                SET generation=%s, tested_total=%s, promoted_total=%s, updated_at=NOW()
+                WHERE id=1
+                """,
+                (generation, tested_total, promoted_total),
+            )
+            conn.commit()
+
     async def save_checkpoint(
         self,
         signature: str,
