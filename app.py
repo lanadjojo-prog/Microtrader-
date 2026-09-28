@@ -13,6 +13,7 @@ from strategy_lab import StrategyLab
 from research_labs import ResearchLabs
 from crypto_lab import CryptoMicrostructureLab
 from research_agent import ResearchAgent
+from research_coordinator import ResearchCoordinator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +26,7 @@ lab = StrategyLab(settings, client)
 research = ResearchLabs(settings, client)
 crypto_lab = CryptoMicrostructureLab(settings)
 research_agent = ResearchAgent(settings, lab)
+coordinator = ResearchCoordinator(lab, research)
 
 
 @asynccontextmanager
@@ -33,13 +35,13 @@ async def lifespan(app: FastAPI):
         await engine.start()
     if settings.lab_auto_start and settings.api_key and settings.api_secret:
         await lab.start()
-    if settings.research_auto_start and settings.api_key and settings.api_secret:
-        await research.start()
+    await coordinator.start()
     if settings.crypto_lab_auto_start:
         await crypto_lab.start()
     if settings.research_agent_auto_start:
         await research_agent.start()
     yield
+    await coordinator.stop()
     await research_agent.stop()
     await engine.stop()
     await lab.stop()
@@ -126,6 +128,12 @@ async def lab_stop(authorization: str | None = Header(default=None)):
     require_token(authorization)
     await lab.stop()
     return {"ok": True, "running": False}
+
+
+@app.get("/api/coordinator/status")
+async def coordinator_status(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return coordinator.public_state()
 
 
 @app.get("/api/research/status")
@@ -423,7 +431,7 @@ async function loadLab(manual=false){
   const [s,r]=await Promise.all([api('lab/status'),api('lab/results')]);
   renderLab(s,r.results||[]);
   lastStrategyState=s;
-  updateOverview(lastStrategyState,lastResearchState,lastCryptoState);
+  updateOverview(lastStrategyState,lastResearchState,lastCryptoState,lastCoordinatorState);
  }catch(e){
   document.getElementById('labMessage').textContent='Lab error: '+e.message;
  }
@@ -537,7 +545,7 @@ async function loadCrypto(){
     '</div>';
   }).join(''):'<p class="muted">Start het lab om live marktdata te verzamelen.</p>';
   document.getElementById('cryptoRaw').textContent=JSON.stringify({paper_simulation:s.paper_simulation,strategy_stats:s.strategy_stats,markets:s.markets},null,2);
-  updateOverview(lastStrategyState,lastResearchState,lastCryptoState);
+  updateOverview(lastStrategyState,lastResearchState,lastCryptoState,lastCoordinatorState);
  }catch(e){
   document.getElementById('cryptoMessage').textContent=e.message==='Unauthorized'?'Dashboard token ontbreekt of is ongeldig.':e.message;
  }
@@ -548,23 +556,25 @@ async function cryptoAction(x){
 }
 const researchNames=['market','session','regime','high_frequency','walk_forward','parameter_stability','cost_stress','monte_carlo','position_sizing','compounding','leverage','risk_of_ruin','recovery','portfolio','capital_allocation','aggressive_growth','master'];
 function prettyLabName(x){return String(x||'').split('_').map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(' ')}
-function updateOverview(strategyState,researchState,cryptoState){
+function updateOverview(strategyState,researchState,cryptoState,coordinatorState){
  const strategyRunning=!!strategyState?.running, researchRunning=!!researchState?.running, cryptoRunning=!!cryptoState?.running;
  document.getElementById('overallStatus').innerHTML=
    `<span class="pill ${strategyRunning?'run':'good'}">Strategy Lab: ${strategyRunning?'RUNNING':'STOPPED'}</span>`+
    `<span class="pill ${researchRunning?'run':'good'}">Research Labs: ${researchRunning?'RUNNING':'STOPPED'}</span>`+
    `<span class="pill ${cryptoRunning?'run':'good'}">Crypto Lab: ${cryptoRunning?'COLLECTING':'STOPPED'}</span>`+
+   `<span class="pill run">Scheduler: ${esc(prettyLabName(coordinatorState?.mode||'idle'))}</span>`+
    (researchState?.current_lab?`<span class="muted">Current: ${esc(prettyLabName(researchState.current_lab))}</span>`:'');
  const vals={
    'Strategies tested':strategyState?.tested_total??'-',
    'Strategies promoted':(strategyState?.promoted_total??0)+'/'+(strategyState?.target_promoted??'-'),
    'Research progress':(researchState?.completed_labs??0)+'/'+(researchState?.total_labs??17),
    'Active research':researchState?.current_lab?prettyLabName(researchState.current_lab):'-',
-   'Crypto observations':cryptoState?.observations??'-'
+   'Crypto observations':cryptoState?.observations??'-',
+   'Scheduler':coordinatorState?.message||'-'
  };
  document.getElementById('overallMetrics').innerHTML=Object.entries(vals).map(([k,v])=>`<div class="metric"><span class="muted">${k}</span><b>${esc(v)}</b></div>`).join('');
 }
-let lastStrategyState=null,lastResearchState=null,lastCryptoState=null;
+let lastStrategyState=null,lastResearchState=null,lastCryptoState=null,lastCoordinatorState=null;
 async function loadResearch(){
  try{
   const s=await api('research/status');
@@ -581,16 +591,22 @@ async function loadResearch(){
     return `<div class="lab-mini"><b>${esc(prettyLabName(name))}</b><span class="state ${cls}">${state}</span></div>`;
   }).join('');
   document.getElementById('researchResults').textContent=JSON.stringify(s.labs||{},null,2);
-  updateOverview(lastStrategyState,lastResearchState,lastCryptoState);
+  updateOverview(lastStrategyState,lastResearchState,lastCryptoState,lastCoordinatorState);
  }catch(e){
   document.getElementById('researchResults').textContent=e.message==='Unauthorized'?'Dashboard token ontbreekt of is ongeldig.':e.message;
  }
+}
+async function loadCoordinator(){
+ try{
+  lastCoordinatorState=await api('coordinator/status');
+  updateOverview(lastStrategyState,lastResearchState,lastCryptoState,lastCoordinatorState);
+ }catch(e){}
 }
 async function researchAction(x){try{await api('research/'+x,'POST');await loadResearch()}catch(e){document.getElementById('researchResults').textContent=e.message}}
 const savedToken=sessionStorage.getItem('microtraderDashboardToken')||'';
 document.getElementById('token').value=savedToken;
 document.getElementById('token').addEventListener('input',e=>sessionStorage.setItem('microtraderDashboardToken',e.target.value));
-setInterval(()=>{if(token()){loadStatus();loadAgent();loadLab();loadCrypto();loadResearch()}},5000);
-if(token()){loadStatus();loadAgent();loadLab();loadCrypto();loadResearch();}
+setInterval(()=>{if(token()){loadStatus();loadAgent();loadLab();loadCrypto();loadResearch();loadCoordinator()}},5000);
+if(token()){loadStatus();loadAgent();loadLab();loadCrypto();loadResearch();loadCoordinator();}
 </script>
 </body></html>'''
