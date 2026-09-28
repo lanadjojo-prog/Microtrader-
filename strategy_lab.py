@@ -347,7 +347,7 @@ def choose_batch(results: List[dict], seen: set[str], generation: int, batch_siz
 
     # If nothing has shown promise, broaden Discovery instead of endlessly tuning weak families.
     for tf in (1, 3, 5, 15):
-        g = max(1, generation)
+        g = min(6, max(1, generation))
         broad = [
             Candidate("breakout", {"timeframe_min": tf, "_phase": "discovery", "window": 10 + 5*g, "buffer_bps": 2.0 + g, "max_hold": 12 + 4*g}),
             Candidate("extreme_reversal", {"timeframe_min": tf, "_phase": "discovery", "window": 8 + 2*g, "shock_z": 1.5 + 0.15*g, "max_hold": 8 + 2*g}),
