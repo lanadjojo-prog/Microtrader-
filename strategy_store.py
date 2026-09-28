@@ -37,6 +37,12 @@ class StrategyStore:
                 )
             """)
             await conn.execute("""
+                ALTER TABLE microtrader_strategy_results
+                ADD COLUMN IF NOT EXISTS family TEXT,
+                ADD COLUMN IF NOT EXISTS funnel_stage TEXT,
+                ADD COLUMN IF NOT EXISTS funnel_score DOUBLE PRECISION
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_strategy_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     generation INTEGER NOT NULL DEFAULT 0,
@@ -61,11 +67,13 @@ class StrategyStore:
                 INSERT INTO microtrader_strategy_results (
                     signature, strategy, params, promoted, rejection_reasons,
                     train, oos, stress_oos, positive_symbol_ratio,
-                    positive_symbols, symbol_count, per_symbol, tested_at
+                    positive_symbols, symbol_count, per_symbol,
+                    family, funnel_stage, funnel_score, tested_at
                 ) VALUES (
                     %s, %s, %s::jsonb, %s, %s::jsonb,
                     %s::jsonb, %s::jsonb, %s::jsonb, %s,
-                    %s, %s, %s::jsonb, NOW()
+                    %s, %s, %s::jsonb,
+                    %s, %s, %s, NOW()
                 )
                 ON CONFLICT (signature) DO UPDATE SET
                     promoted = EXCLUDED.promoted,
@@ -77,6 +85,9 @@ class StrategyStore:
                     positive_symbols = EXCLUDED.positive_symbols,
                     symbol_count = EXCLUDED.symbol_count,
                     per_symbol = EXCLUDED.per_symbol,
+                    family = EXCLUDED.family,
+                    funnel_stage = EXCLUDED.funnel_stage,
+                    funnel_score = EXCLUDED.funnel_score,
                     tested_at = NOW()
                 """,
                 (
@@ -92,6 +103,9 @@ class StrategyStore:
                     result.get("positive_symbols"),
                     result.get("symbol_count"),
                     json.dumps(result.get("per_symbol", {})),
+                    result.get("family"),
+                    result.get("funnel_stage"),
+                    result.get("funnel_score"),
                 ),
             )
             await conn.commit()
@@ -128,9 +142,11 @@ class StrategyStore:
                 """
                 SELECT signature, strategy, params, promoted, rejection_reasons,
                        train, oos, stress_oos, positive_symbol_ratio,
-                       positive_symbols, symbol_count, per_symbol, tested_at
+                       positive_symbols, symbol_count, per_symbol,
+                       family, funnel_stage, funnel_score, tested_at
                 FROM microtrader_strategy_results
                 ORDER BY promoted DESC,
+                         funnel_score DESC NULLS LAST,
                          (oos->>'expectancy_bps')::double precision DESC NULLS LAST,
                          tested_at DESC
                 LIMIT %s
