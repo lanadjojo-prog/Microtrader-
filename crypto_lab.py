@@ -68,6 +68,7 @@ class CryptoMicrostructureLab:
         }
         self._sim: Dict[str, dict] = {}
         self._sim_history = defaultdict(list)
+        self._last_process_monotonic: Dict[str, float] = {}
 
     def _maker_fee_bps(self, symbol: str) -> float:
         quote = symbol.rsplit("-", 1)[-1].upper()
@@ -147,7 +148,7 @@ class CryptoMicrostructureLab:
         for symbol in self.settings.crypto_lab_symbols:
             try:
                 await self._seed_book(symbol)
-                self._process_symbol(symbol)
+                self._process_symbol(symbol, force=True)
             except Exception as exc:
                 log.warning("Could not seed %s: %s", symbol, exc)
 
@@ -380,7 +381,13 @@ class CryptoMicrostructureLab:
                     s["exit_quote"] = None
                     s["exit_age"] = 0
 
-    def _process_symbol(self, symbol: str):
+    def _process_symbol(self, symbol: str, force: bool = False):
+        now_mono = time.monotonic()
+        min_interval = max(0.05, self.settings.crypto_lab_process_interval_ms / 1000.0)
+        last = self._last_process_monotonic.get(symbol, 0.0)
+        if not force and (now_mono - last) < min_interval:
+            return
+        self._last_process_monotonic[symbol] = now_mono
         feat = self._book_features(symbol)
         if not feat:
             return
