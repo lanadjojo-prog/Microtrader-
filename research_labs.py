@@ -55,6 +55,7 @@ class ResearchLabs:
         if self.state.running:
             return
         self.state=ResearchState(running=True,started_at=datetime.now(timezone.utc).isoformat(),total_labs=len(LABS))
+        log.info("Research Labs start requested")
         self._task=asyncio.create_task(self._run(),name="microtrader-research-labs")
 
     async def stop(self):
@@ -71,6 +72,7 @@ class ResearchLabs:
             start=end-timedelta(days=max(120,self.settings.lab_lookback_days))
             bars_by_symbol={}
             for symbol in self.settings.lab_symbols:
+                log.info("Research Labs loading data: %s", symbol)
                 bars=await self.client.historical_bars(symbol,start,end,self.settings.lab_timeframe,self.settings.lab_max_bars_per_symbol)
                 if len(bars)>=300:
                     bars_by_symbol[symbol]=bars
@@ -97,11 +99,13 @@ class ResearchLabs:
 
             for name in LABS[:-1]:
                 self.state.current_lab=name
+                log.info("Research Lab stage start: %s", name)
                 fn=getattr(self,f"_lab_{name}")
                 result=await asyncio.to_thread(fn,candidates,bars_by_symbol)
                 self._results[name]=result
                 await self.store.save(name,"completed",result)
                 self.state.completed_labs+=1
+                log.info("Research Lab stage complete: %s (%s/%s)", name, self.state.completed_labs, self.state.total_labs)
                 await asyncio.sleep(0)
 
             self.state.current_lab="master"
@@ -109,6 +113,7 @@ class ResearchLabs:
             self._results["master"]=master
             await self.store.save("master","completed",master)
             self.state.completed_labs+=1
+            log.info("Research Labs complete: %s/%s", self.state.completed_labs, self.state.total_labs)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
