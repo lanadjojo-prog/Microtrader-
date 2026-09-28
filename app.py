@@ -265,7 +265,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 </div>
 <div class="card" id="stock-lab">
   <div class="section-title"><h3>Stock Strategy Lab</h3><span class="pill">ALPACA · RESEARCH</span></div>
-  <p class="muted">Discovery funnel on 1-minute source data: broad strategy families first, then Incubator and Deep Search only for promising directions.</p>
+  <p class="muted">Funnel: <b>Discovery</b> zoekt breed → <b>Incubator</b> maakt varianten rond kansrijke kandidaten → <b>Deep Search</b> valideert op volledige historie → <b>Promoted</b> haalt alle harde filters.</p>
   <div class="row"><button onclick="labAction('start')">Run Strategy Lab</button><button onclick="labAction('stop')">Stop Lab</button><button onclick="loadLab(true)">Refresh Lab</button></div>
   <div class="lab-head" style="margin-top:14px">
     <div id="labStatus"><span class="pill">IDLE</span></div>
@@ -273,7 +273,10 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
   </div>
   <div class="progress"><div id="labProgress"></div></div>
   <div id="labMessage" class="muted">Not run yet.</div>
+  <div id="labWork" class="metric" style="margin-top:12px"><span class="muted">Current work</span><b>Waiting…</b></div>
   <div id="labMetrics" class="grid" style="margin-top:12px"></div>
+  <h4 style="margin-bottom:6px">Promising pipeline</h4>
+  <div id="labPromising" class="lab-grid"></div>
   <div id="labResults" class="scroll"></div>
 </div>
 <div class="card" id="crypto-lab">
@@ -346,15 +349,36 @@ function renderLab(s,results){
  document.getElementById('labUpdated').textContent=s.completed_at?('Completed '+new Date(s.completed_at).toLocaleString()):(s.started_at?('Started '+new Date(s.started_at).toLocaleString()):'');
  const sum=s.summary||{};
  const fc=sum.funnel_counts||{};
+ const cand=s.current_candidate||'';
+ const cp=s.current_params||{};
+ const symTotal=Number(s.current_symbol_total||0), symIdx=Number(s.current_symbol_index||0);
+ const symbolPct=symTotal?Math.round((symIdx/symTotal)*100):0;
+ const currentBits=[];
+ if(cand) currentBits.push(prettyLabName(cand));
+ if(cp.timeframe_min) currentBits.push(cp.timeframe_min+'m');
+ if(s.current_symbol) currentBits.push('symbol '+s.current_symbol+' '+symIdx+'/'+symTotal);
+ if(s.candidate_seconds) currentBits.push(Math.round(Number(s.candidate_seconds))+'s');
+ document.getElementById('labWork').innerHTML=
+   '<span class="muted">Current work</span><b>'+esc(currentBits.join(' · ')||prettyLabName(s.stage||'idle'))+'</b>'+
+   (symTotal?'<div class="progress" style="margin:8px 0 0"><div style="width:'+symbolPct+'%"></div></div>':'')+
+   '<div class="small muted">'+esc(s.last_completed_candidate?('Last completed: '+prettyLabName(s.last_completed_candidate)+(s.candidate_seconds?' · '+fmt(s.candidate_seconds,1)+'s':'')):'No candidate completed in this run yet.')+'</div>';
  const vals={
    'Source data':sum.source_timeframe||'1Min',
    'Current stage':prettyLabName(s.stage||'idle'),
-   'Tested':sum.candidates_tested??results.length,
+   'Tested':sum.candidates_tested??s.tested_total??results.length,
    'Incubator':fc.incubator??0,
    'Deep Search':fc.deep_search??0,
    'Promoted':(fc.promoted??sum.promoted_count??s.promoted_total??0)+'/'+(sum.target_promoted??s.target_promoted??'-')
  };
  document.getElementById('labMetrics').innerHTML=Object.entries(vals).map(([k,v])=>`<div class="metric"><span class="muted">${k}</span><b>${v}</b></div>`).join('');
+ const promising=results.filter(x=>['incubator','deep_search','promoted'].includes(x.funnel_stage)).slice(0,6);
+ document.getElementById('labPromising').innerHTML=promising.length?promising.map(x=>{
+   const o=x.oos||{}, stage=x.promoted?'PROMOTED':(x.funnel_stage==='deep_search'?'DEEP SEARCH':'INCUBATOR');
+   const cls=x.promoted?'done':(x.funnel_stage==='deep_search'?'running':'waiting');
+   return '<div class="lab-mini"><b>'+esc(prettyLabName(x.strategy))+' · '+esc((x.params||{}).timeframe_min||'-')+'m</b>'+
+     '<span class="state '+cls+'">'+stage+'</span>'+
+     '<div class="small muted" style="margin-top:7px">Score '+fmt(x.funnel_score,1)+' · PF '+fmt(o.profit_factor,2)+' · Exp '+fmt(o.expectancy_bps,2)+' bps · '+(o.trades??0)+' trades</div></div>';
+ }).join(''):'<div class="lab-mini"><b>Nog geen promising kandidaat</b><span class="state waiting">DISCOVERY</span><div class="small muted" style="margin-top:7px">Het lab zoekt breed totdat een kandidaat Incubator of Deep Search haalt.</div></div>';
  if(!results.length){
    document.getElementById('labResults').innerHTML='<p class="muted">No results yet. During data loading this is normal.</p>';
    return;
