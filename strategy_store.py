@@ -114,16 +114,17 @@ class StrategyStore:
         if not self.enabled:
             return {"generation": 0, "tested_total": 0, "promoted_total": 0}
         async with await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row) as conn:
-            row = (await conn.execute(
+            cur = await conn.execute(
                 "SELECT generation, tested_total, promoted_total FROM microtrader_strategy_state WHERE id=1"
-            )).fetchone()
+            )
+            row = await cur.fetchone()
             return dict(row) if row else {"generation": 0, "tested_total": 0, "promoted_total": 0}
 
     async def load_results(self, limit: int = 250) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
         async with await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row) as conn:
-            rows = (await conn.execute(
+            cur = await conn.execute(
                 """
                 SELECT signature, strategy, params, promoted, rejection_reasons,
                        train, oos, stress_oos, positive_symbol_ratio,
@@ -135,14 +136,16 @@ class StrategyStore:
                 LIMIT %s
                 """,
                 (limit,),
-            )).fetchall()
+            )
+            rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
     async def load_signatures(self) -> set[str]:
         if not self.enabled:
             return set()
         async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
-            rows = (await conn.execute(
+            cur = await conn.execute(
                 "SELECT signature FROM microtrader_strategy_results"
-            )).fetchall()
+            )
+            rows = await cur.fetchall()
             return {str(r[0]) for r in rows}
