@@ -12,6 +12,7 @@ from engine import TradingEngine
 from strategy_lab import StrategyLab
 from research_labs import ResearchLabs
 from crypto_lab import CryptoMicrostructureLab
+from research_agent import ResearchAgent
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +24,7 @@ engine = TradingEngine(settings, client)
 lab = StrategyLab(settings, client)
 research = ResearchLabs(settings, client)
 crypto_lab = CryptoMicrostructureLab(settings)
+research_agent = ResearchAgent(settings, lab)
 
 
 @asynccontextmanager
@@ -35,7 +37,10 @@ async def lifespan(app: FastAPI):
         await research.start()
     if settings.crypto_lab_auto_start:
         await crypto_lab.start()
+    if settings.research_agent_auto_start:
+        await research_agent.start()
     yield
+    await research_agent.stop()
     await engine.stop()
     await lab.stop()
     await research.stop()
@@ -145,6 +150,33 @@ async def research_stop(authorization: str | None = Header(default=None)):
     return {"ok": True, "running": False}
 
 
+@app.get("/api/agent/status")
+async def agent_status(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return research_agent.public_state()
+
+
+@app.post("/api/agent/start")
+async def agent_start(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await research_agent.start()
+    return {"ok": True, "running": True}
+
+
+@app.post("/api/agent/stop")
+async def agent_stop(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await research_agent.stop()
+    return {"ok": True, "running": False}
+
+
+@app.post("/api/agent/cycle")
+async def agent_cycle(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await research_agent.cycle()
+    return research_agent.public_state()
+
+
 @app.get("/api/crypto-lab/status")
 async def crypto_lab_status(authorization: str | None = Header(default=None)):
     require_token(authorization)
@@ -206,7 +238,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 </head>
 <body>
 <h1>MicroTrader</h1><p class="muted">Trading + research dashboard · safe-by-default</p>
-<div class="nav"><a href="#engine">Trading Engine</a><a href="#stock-lab">Stock Lab</a><a href="#crypto-lab">Crypto Lab</a><a href="#research-labs">Research Labs</a></div>
+<div class="nav"><a href="#engine">Trading Engine</a><a href="#agent">Research Agent</a><a href="#stock-lab">Stock Lab</a><a href="#crypto-lab">Crypto Lab</a><a href="#research-labs">Research Labs</a></div>
 <div class="card">
   <div class="row"><input id="token" type="password" placeholder="Dashboard token" style="min-width:260px"><button onclick="loadStatus()">Connect</button><button onclick="action('start')">Start</button><button onclick="action('stop')">Stop</button><button class="danger" onclick="action('flatten')">Flatten</button></div>
 </div>
@@ -218,6 +250,19 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 <div class="card"><div id="headline" class="row"></div><div id="metrics" class="grid" style="margin-top:12px"></div></div>
 <div class="card"><h3>Positions</h3><pre id="positions">Not connected.</pre></div>
 <div class="card"><h3>Recent executions</h3><pre id="executions">Not connected.</pre></div>
+<div class="card" id="agent">
+  <div class="section-title"><h3>Research Agent</h3><span class="pill good">RESEARCH ONLY</span></div>
+  <div class="mode-banner"><b>Autonoom, begrensd.</b> De agent mag research prioriteren en vervolgexperimenten sturen, maar kan geen orders plaatsen of live trading inschakelen.</div>
+  <div class="row"><button onclick="agentAction('start')">Start Agent</button><button onclick="agentAction('stop')">Stop Agent</button><button onclick="agentAction('cycle')">Run Cycle Now</button><button onclick="loadAgent()">Refresh</button></div>
+  <div id="agentStatus" class="row" style="margin-top:14px"><span class="pill">IDLE</span></div>
+  <div id="agentMessage" class="muted" style="margin-top:8px">Nog niet geladen.</div>
+  <div id="agentMetrics" class="grid" style="margin-top:12px"></div>
+  <h4 style="margin-bottom:6px">Current Research Direction</h4>
+  <div id="agentFocus" class="row"></div>
+  <h4 style="margin-bottom:6px">Hypotheses</h4>
+  <div id="agentHypotheses" class="lab-grid"></div>
+  <details><summary>Laatste agent-besluit / technische details</summary><pre id="agentRaw" class="small">Not loaded.</pre></details>
+</div>
 <div class="card" id="stock-lab">
   <div class="section-title"><h3>Stock Strategy Lab</h3><span class="pill">ALPACA · RESEARCH</span></div>
   <p class="muted">Discovery funnel on 1-minute source data: broad strategy families first, then Incubator and Deep Search only for promising directions.</p>
@@ -366,6 +411,43 @@ async function labAction(x){
   document.getElementById('labMessage').textContent=msg;
  }
 }
+async function loadAgent(){
+ try{
+  const s=await api('agent/status');
+  const cls=s.running?'run':(s.last_error?'bad':'good');
+  const label=s.running?'RUNNING':(s.last_error?'ERROR':'STOPPED');
+  document.getElementById('agentStatus').innerHTML=
+    '<span class="pill '+cls+'">'+label+'</span>'+
+    '<span class="pill good">NO ORDER PERMISSION</span>'+
+    '<span class="muted small">'+esc(s.stage||'idle')+'</span>';
+  document.getElementById('agentMessage').textContent=s.message||'';
+  const vals={
+    'Cycles':s.cycles||0,
+    'Last cycle':s.last_cycle_at?new Date(s.last_cycle_at).toLocaleTimeString():'-',
+    'Focus families':(s.focus_families||[]).length,
+    'Focus timeframes':(s.focus_timeframes||[]).map(x=>x+'m').join(', ')||'-'
+  };
+  document.getElementById('agentMetrics').innerHTML=Object.entries(vals).map(([k,v])=>'<div class="metric"><span class="muted">'+esc(k)+'</span><b>'+esc(v)+'</b></div>').join('');
+  const fam=s.focus_families||[], tfs=s.focus_timeframes||[];
+  document.getElementById('agentFocus').innerHTML=
+    fam.map(x=>'<span class="pill run">'+esc(prettyLabName(x))+'</span>').join('')+
+    tfs.map(x=>'<span class="pill">'+esc(x)+'m</span>').join('');
+  const hy=s.hypotheses||[];
+  document.getElementById('agentHypotheses').innerHTML=hy.length?hy.map(h=>
+    '<div class="lab-mini"><b>'+esc(prettyLabName(h.family||''))+' · '+esc(h.timeframe_min||'-')+'m</b>'+
+    '<div class="small muted">Score '+fmt(h.funnel_score,1)+' · Exp '+fmt(h.expectancy_bps,3)+' bps · PF '+fmt(h.profit_factor,2)+' · Payoff '+fmt(h.payoff_ratio,2)+'x</div>'+
+    '<div class="small" style="margin-top:7px">'+esc(h.thesis||'')+'</div></div>'
+  ).join(''):'<p class="muted">Nog geen hypotheses. De agent wacht op nieuwe funnel-resultaten.</p>';
+  document.getElementById('agentRaw').textContent=JSON.stringify(s,null,2);
+ }catch(e){
+  document.getElementById('agentMessage').textContent=e.message==='Unauthorized'?'Dashboard token ontbreekt of is ongeldig.':e.message;
+ }
+}
+async function agentAction(x){
+ try{await api('agent/'+x,'POST');await loadAgent();await loadLab(true)}
+ catch(e){document.getElementById('agentMessage').textContent=e.message}
+}
+
 async function loadCrypto(){
  try{
   const s=await api('crypto-lab/status');
