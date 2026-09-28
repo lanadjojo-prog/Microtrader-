@@ -241,8 +241,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
   <div id="cryptoMetrics" class="grid" style="margin-top:12px"></div>
   <h4 style="margin-bottom:6px">Strategy Scoreboard</h4>
   <div id="cryptoScoreboard" class="scroll"></div>
-  <h4 style="margin-bottom:6px">Live Market Signals</h4>
-  <div id="cryptoMarkets" class="lab-grid"></div>
+  <details><summary>Live Market Signals tonen</summary><div id="cryptoMarkets" class="lab-grid"></div></details>
   <details><summary>Strategiestatistieken / technische details</summary><pre id="cryptoRaw" class="small">Not loaded.</pre></details>
 </div>
 <div class="card" id="research-labs">
@@ -362,9 +361,11 @@ async function loadCrypto(){
   const vals={
     'Markets':(s.markets||[]).length+'/'+(s.symbols||[]).length,
     'Observations':s.observations||0,
-    'Cycles':s.cycles||0,
-    'Polling':(s.poll_seconds||'-')+' sec',
-    'Maker fee assumption':fmt(s.maker_fee_bps_one_way,1)+' bps / side',
+    'Book events':s.book_events||0,
+    'Trade events':s.trade_events||0,
+    'Reconnects':s.reconnects||0,
+    'Book depth':s.book_depth||'-',
+    'Flow window':(s.flow_window_seconds||'-')+' sec',
     'Last update':s.last_update?new Date(s.last_update).toLocaleTimeString():'-'
   };
   document.getElementById('cryptoMetrics').innerHTML=Object.entries(vals).map(function(kv){
@@ -372,33 +373,40 @@ async function loadCrypto(){
   }).join('');
   const paper=(s.paper_simulation||{});
   const strategies=(paper.strategies||{});
-  const strategyOrder=['mean_reversion','market_maker','imbalance','hybrid'];
-  const rows=strategyOrder.map(function(name){
-    const x=strategies[name]||{};
-    const pnl=Number(x.net_pnl_eur||0);
+  const strategyOrder=['mean_reversion','market_maker','top_imbalance','full_book_imbalance','order_flow','liquidity_vacuum','flow_reversal','momentum','hybrid','adaptive'];
+  const ranked=strategyOrder.map(function(name){
+    return {name:name,x:strategies[name]||{}};
+  }).sort(function(a,b){return Number(b.x.expectancy_bps||0)-Number(a.x.expectancy_bps||0)});
+  const rows=ranked.map(function(row,idx){
+    const name=row.name,x=row.x;
+    const pnl=Number(x.net_pnl_quote||x.net_pnl_eur||0);
     const pnlClass=pnl>0?'ok':(pnl<0?'no':'muted');
     return '<tr>'+
+      '<td>'+(idx+1)+'</td>'+
       '<td>'+esc(prettyLabName(name))+'</td>'+
       '<td>'+(x.trades||0)+'</td>'+
       '<td>'+fmt(x.win_rate_pct,1)+'%</td>'+
-      '<td class="'+pnlClass+'">€'+fmt(pnl,4)+'</td>'+
+      '<td class="'+pnlClass+'">'+fmt(pnl,4)+'</td>'+
       '<td>'+fmt(x.expectancy_bps,3)+' bps</td>'+
-      '<td>€'+fmt(x.max_drawdown_eur,4)+'</td>'+
+      '<td>'+fmt(x.max_drawdown_quote||x.max_drawdown_eur,4)+'</td>'+
       '<td>'+((x.open_positions||0)+(x.pending_entries||0))+'</td>'+
     '</tr>';
   }).join('');
+  const qs=paper.quote_summary||{};
   document.getElementById('cryptoScoreboard').innerHTML=
-    '<div class="small muted" style="margin:6px 0 10px">Paper model: '+esc(paper.fill_model||'-')+
-    ' · €'+fmt(paper.notional_eur_per_trade,2)+' per trade · maker fees inbegrepen</div>'+
-    '<table class="lab-table"><thead><tr><th>Strategy</th><th>Trades</th><th>Winrate</th><th>Net P&L</th><th>Expectancy</th><th>Max DD</th><th>Open/Pending</th></tr></thead><tbody>'+rows+'</tbody></table>';
+    '<div class="small muted" style="margin:6px 0 10px">Realtime WebSocket · '+esc(s.stream||'')+
+    ' · '+fmt(paper.notional_eur_per_trade,2)+' quote units per paper trade · maker fees per markt inbegrepen</div>'+
+    '<div class="row small" style="margin-bottom:8px"><span class="pill">EUR: '+(qs.EUR?.trades||0)+' trades · '+fmt(qs.EUR?.expectancy_bps,3)+' bps</span><span class="pill">USDC: '+(qs.USDC?.trades||0)+' trades · '+fmt(qs.USDC?.expectancy_bps,3)+' bps</span></div>'+
+    '<table class="lab-table"><thead><tr><th>#</th><th>Strategy</th><th>Trades</th><th>Winrate</th><th>Net P&L*</th><th>Expectancy</th><th>Max DD*</th><th>Open/Pending</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+    '<div class="small muted">* P&L staat in de quote currency van de markt; EUR en USDC worden niet als exact dezelfde valuta opgeteld voor financiële conclusies.</div>';
   const markets=s.markets||[];
   document.getElementById('cryptoMarkets').innerHTML=markets.length?markets.map(function(m){
     function sig(on,label){return '<span class="'+(on?'signal-on':'signal-off')+'">'+(on?'●':'○')+' '+label+'</span>';}
     return '<div class="crypto-card">'+
       '<div class="crypto-market">'+esc(m.market)+'</div>'+
       '<div class="small muted">Mid €'+fmt(m.mid,2)+' · Spread '+fmt(m.spread_bps,2)+' bps</div>'+
-      '<div class="small muted">Z-score '+fmt(m.zscore,2)+' · Imbalance '+fmt(m.imbalance,2)+'</div>'+
-      '<div class="small" style="margin-top:8px">'+sig(m.mean_reversion_signal,'Mean reversion')+'<br>'+sig(m.market_maker_signal,'Maker spread')+'<br>'+sig(m.imbalance_signal,'Order-book imbalance')+'<br>'+sig(m.hybrid_signal,'Hybrid')+'</div>'+
+      '<div class="small muted">Z '+fmt(m.zscore,2)+' · Top '+fmt(m.top_imbalance,2)+' · Full book '+fmt(m.full_book_imbalance,2)+' · Flow '+fmt(m.flow_imbalance,2)+'</div>'+
+      '<div class="small" style="margin-top:8px">'+Object.entries(m.signals||{}).filter(function(kv){return kv[1]}).map(function(kv){return sig(true,prettyLabName(kv[0]));}).join('<br>')+'</div>'+
     '</div>';
   }).join(''):'<p class="muted">Start het lab om live marktdata te verzamelen.</p>';
   document.getElementById('cryptoRaw').textContent=JSON.stringify({paper_simulation:s.paper_simulation,strategy_stats:s.strategy_stats,markets:s.markets},null,2);
