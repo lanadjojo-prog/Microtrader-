@@ -239,6 +239,9 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
   <div id="cryptoStatus" class="row" style="margin-top:14px"><span class="pill">IDLE</span></div>
   <div id="cryptoMessage" class="muted" style="margin-top:8px">Nog niet gestart.</div>
   <div id="cryptoMetrics" class="grid" style="margin-top:12px"></div>
+  <h4 style="margin-bottom:6px">Strategy Scoreboard</h4>
+  <div id="cryptoScoreboard" class="scroll"></div>
+  <h4 style="margin-bottom:6px">Live Market Signals</h4>
   <div id="cryptoMarkets" class="lab-grid"></div>
   <details><summary>Strategiestatistieken / technische details</summary><pre id="cryptoRaw" class="small">Not loaded.</pre></details>
 </div>
@@ -358,6 +361,27 @@ async function loadCrypto(){
   document.getElementById('cryptoMetrics').innerHTML=Object.entries(vals).map(function(kv){
     return '<div class="metric"><span class="muted">'+esc(kv[0])+'</span><b>'+esc(kv[1])+'</b></div>';
   }).join('');
+  const paper=(s.paper_simulation||{});
+  const strategies=(paper.strategies||{});
+  const strategyOrder=['mean_reversion','market_maker','imbalance','hybrid'];
+  const rows=strategyOrder.map(function(name){
+    const x=strategies[name]||{};
+    const pnl=Number(x.net_pnl_eur||0);
+    const pnlClass=pnl>0?'ok':(pnl<0?'no':'muted');
+    return '<tr>'+
+      '<td>'+esc(prettyLabName(name))+'</td>'+
+      '<td>'+(x.trades||0)+'</td>'+
+      '<td>'+fmt(x.win_rate_pct,1)+'%</td>'+
+      '<td class="'+pnlClass+'">€'+fmt(pnl,4)+'</td>'+
+      '<td>'+fmt(x.expectancy_bps,3)+' bps</td>'+
+      '<td>€'+fmt(x.max_drawdown_eur,4)+'</td>'+
+      '<td>'+((x.open_positions||0)+(x.pending_entries||0))+'</td>'+
+    '</tr>';
+  }).join('');
+  document.getElementById('cryptoScoreboard').innerHTML=
+    '<div class="small muted" style="margin:6px 0 10px">Paper model: '+esc(paper.fill_model||'-')+
+    ' · €'+fmt(paper.notional_eur_per_trade,2)+' per trade · maker fees inbegrepen</div>'+
+    '<table class="lab-table"><thead><tr><th>Strategy</th><th>Trades</th><th>Winrate</th><th>Net P&L</th><th>Expectancy</th><th>Max DD</th><th>Open/Pending</th></tr></thead><tbody>'+rows+'</tbody></table>';
   const markets=s.markets||[];
   document.getElementById('cryptoMarkets').innerHTML=markets.length?markets.map(function(m){
     function sig(on,label){return '<span class="'+(on?'signal-on':'signal-off')+'">'+(on?'●':'○')+' '+label+'</span>';}
@@ -368,7 +392,7 @@ async function loadCrypto(){
       '<div class="small" style="margin-top:8px">'+sig(m.mean_reversion_signal,'Mean reversion')+'<br>'+sig(m.market_maker_signal,'Maker spread')+'<br>'+sig(m.imbalance_signal,'Order-book imbalance')+'<br>'+sig(m.hybrid_signal,'Hybrid')+'</div>'+
     '</div>';
   }).join(''):'<p class="muted">Start het lab om live marktdata te verzamelen.</p>';
-  document.getElementById('cryptoRaw').textContent=JSON.stringify({strategy_stats:s.strategy_stats,markets:s.markets},null,2);
+  document.getElementById('cryptoRaw').textContent=JSON.stringify({paper_simulation:s.paper_simulation,strategy_stats:s.strategy_stats,markets:s.markets},null,2);
   updateOverview(lastStrategyState,lastResearchState,lastCryptoState);
  }catch(e){
   document.getElementById('cryptoMessage').textContent=e.message==='Unauthorized'?'Dashboard token ontbreekt of is ongeldig.':e.message;
