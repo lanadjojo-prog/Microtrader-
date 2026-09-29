@@ -16,6 +16,7 @@ from forex_backtest import (
     candidate_signature,
     evaluate_candidate,
 )
+from forex_data import ExternalForexData
 from forex_store import ForexStrategyStore
 
 log = logging.getLogger("microtrader.forex_lab")
@@ -25,7 +26,7 @@ log = logging.getLogger("microtrader.forex_lab")
 class ForexLabState:
     running: bool = False
     stage: str = "idle"
-    message: str = "Waiting for cTrader credentials"
+    message: str = "Ready for read-only forex research data"
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     last_error: Optional[str] = None
@@ -46,14 +47,20 @@ class ForexLabState:
 class ForexStrategyLab:
     """CPU-conscious forex strategy research.
 
-    It loads one 1-minute source dataset per pair, then aggregates locally for
-    5m/15m candidates. This prevents repeated broker downloads and lets the
-    small Render instance spend its CPU on strategy evaluation instead.
+    Research can run fully independently from cTrader using read-only external
+    data. cTrader remains available as a separate Fusion Markets validation
+    source when FOREX_DATA_PROVIDER=ctrader is explicitly selected.
     """
 
-    def __init__(self, settings: Settings, client: CTraderClient):
+    def __init__(
+        self,
+        settings: Settings,
+        client: CTraderClient,
+        external_data: ExternalForexData,
+    ):
         self.settings = settings
         self.client = client
+        self.external_data = external_data
         self.store = ForexStrategyStore(settings.database_url)
         self.state = ForexLabState(pairs_total=len(settings.forex_pairs))
         self._task: Optional[asyncio.Task] = None
@@ -63,6 +70,8 @@ class ForexStrategyLab:
     def public_state(self) -> dict:
         payload = asdict(self.state)
         payload["broker"] = self.client.public_state()
+        payload["market_data"] = self.external_data.public_state()
+        payload["data_provider"] = self.settings.forex_data_provider
         payload["pairs"] = self.settings.forex_pairs
         payload["start_capital_eur"] = self.settings.forex_start_capital
         payload["risk_eur"] = self.settings.forex_risk_eur
@@ -76,10 +85,10 @@ class ForexStrategyLab:
     async def start(self) -> None:
         if self.state.running:
             return
-        if not self.client.api_ready:
+        if self.settings.forex_data_provider == "ctrader" and not self.client.api_ready:
             self.state.stage = "waiting_credentials"
             self.state.message = (
-                "Forex Lab is built but cTrader credentials/access token are not configured yet."
+                "FOREX_DATA_PROVIDER=ctrader requires cTrader credentials/access token."
             )
             return
 
@@ -106,26 +115,40 @@ class ForexStrategyLab:
         if self._bars_1m:
             return self._bars_1m
         self.state.stage = "loading_data"
-        self.state.message = "Loading cTrader 1-minute FX history"
-        await self.client.connect_and_authenticate()
+
+        provider = self.settings.forex_data_provider
+        if provider == "ctrader":
+            self.state.message = "Loading cTrader 1-minute FX history"
+            await self.client.connect_and_authenticate()
+        else:
+            self.state.message = "Loading external read-only 1-minute FX history"
 
         bars_by_pair: Dict[str, List[dict]] = {}
         for pair in self.settings.forex_pairs:
             self.state.current_pair = pair
-            self.state.message = f"Loading {pair}"
-            bars = await self.client.historical_bars(
-                pair,
-                timeframe_min=1,
-                max_bars=self.settings.forex_max_bars_per_pair,
-                lookback_days=self.settings.forex_lookback_days,
-            )
+            self.state.message = f"Loading {pair} from {provider}"
+            if provider == "ctrader":
+                bars = await self.client.historical_bars(
+                    pair,
+                    timeframe_min=1,
+                    max_bars=self.settings.forex_max_bars_per_pair,
+                    lookback_days=self.settings.forex_lookback_days,
+                )
+            else:
+                bars = await self.external_data.historical_bars(
+                    pair,
+                    max_bars=self.settings.forex_max_bars_per_pair,
+                    lookback_days=self.settings.forex_lookback_days,
+                )
             if len(bars) >= 300:
                 bars_by_pair[pair] = bars
+            else:
+                log.warning("Forex Lab skipped %s: only %s bars", pair, len(bars))
             self.state.pairs_loaded += 1
             await asyncio.sleep(0)
         self.state.current_pair = ""
         if not bars_by_pair:
-            raise RuntimeError("No usable cTrader FX bars were returned")
+            raise RuntimeError(f"No usable FX bars were returned by {provider}")
         self._bars_1m = bars_by_pair
         return bars_by_pair
 
@@ -192,6 +215,7 @@ class ForexStrategyLab:
                 )
                 signature = evaluation_signature(candidate, source)
                 result["dataset"]["version"] = dataset_version(source)
+                result["dataset"]["source"] = self.settings.forex_data_provider
                 run_id = await self.store.save_run(signature, result)
                 if run_id:
                     result["run_id"] = run_id
