@@ -14,6 +14,8 @@ from research_labs import ResearchLabs
 from crypto_lab import CryptoMicrostructureLab
 from research_agent import ResearchAgent
 from research_coordinator import ResearchCoordinator
+from ctrader_client import CTraderClient, CTraderError
+from forex_lab import ForexStrategyLab
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,20 +29,32 @@ research = ResearchLabs(settings, client)
 crypto_lab = CryptoMicrostructureLab(settings)
 research_agent = ResearchAgent(settings, lab)
 coordinator = ResearchCoordinator(lab, research)
+ctrader = CTraderClient(settings)
+forex_lab = ForexStrategyLab(settings, ctrader)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if settings.auto_start:
-        await engine.start()
-    if settings.lab_auto_start and settings.api_key and settings.api_secret:
-        await lab.start()
-    await coordinator.start()
-    if settings.crypto_lab_auto_start:
-        await crypto_lab.start()
-    if settings.research_agent_auto_start:
-        await research_agent.start()
+    # FOREX_FIRST keeps the legacy stock/crypto code available but prevents it
+    # from consuming CPU while the forex research stack owns the instance.
+    if not settings.forex_first:
+        if settings.auto_start:
+            await engine.start()
+        if settings.lab_auto_start and settings.api_key and settings.api_secret:
+            await lab.start()
+        await coordinator.start()
+        if settings.crypto_lab_auto_start:
+            await crypto_lab.start()
+        if settings.research_agent_auto_start:
+            await research_agent.start()
+
+    if settings.forex_lab_auto_start and ctrader.api_ready:
+        await forex_lab.start()
+
     yield
+
+    await forex_lab.stop()
+    await ctrader.close()
     await coordinator.stop()
     await research_agent.stop()
     await engine.stop()
@@ -63,7 +77,14 @@ def require_token(authorization: str | None):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "paper": settings.paper, "engine_running": engine.state.running}
+    return {
+        "ok": True,
+        "mode": "forex-first" if settings.forex_first else "legacy-mixed",
+        "paper": settings.paper,
+        "engine_running": engine.state.running,
+        "forex_lab_running": forex_lab.state.running,
+        "ctrader_ready": ctrader.api_ready,
+    }
 
 
 @app.get("/api/status")
@@ -227,6 +248,83 @@ async def flatten(authorization: str | None = Header(default=None)):
     await client.cancel_all_orders()
     await client.close_all_positions()
     return {"ok": True}
+
+
+@app.get("/api/ctrader/status")
+async def ctrader_status(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return ctrader.public_state()
+
+
+@app.get("/api/ctrader/oauth-url")
+async def ctrader_oauth_url(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    try:
+        return {"url": ctrader.authorization_url("trading")}
+    except CTraderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/ctrader/connect")
+async def ctrader_connect(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    try:
+        return await ctrader.connect_and_authenticate()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/ctrader/callback", response_class=HTMLResponse)
+async def ctrader_callback(code: str = ""):
+    if not code:
+        return HTMLResponse(
+            "<h3>cTrader authorization failed</h3><p>No authorization code was returned.</p>",
+            status_code=400,
+        )
+    try:
+        token_data = await ctrader.exchange_code(code)
+        expires = token_data.get("expiresIn")
+        return HTMLResponse(
+            "<h3>cTrader demo authorization complete</h3>"
+            "<p>MicroTrader has loaded the access token into this running instance. "
+            "You can close this window and test the connection from the dashboard.</p>"
+            f"<p>Token lifetime reported by cTrader: {expires or '-'} seconds.</p>"
+            "<p>No token or client secret is displayed on this page.</p>"
+        )
+    except Exception as exc:
+        return HTMLResponse(
+            "<h3>cTrader authorization failed</h3>"
+            f"<p>{str(exc)}</p>",
+            status_code=503,
+        )
+
+
+@app.get("/api/forex-lab/status")
+async def forex_lab_status(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return forex_lab.public_state()
+
+
+@app.get("/api/forex-lab/results")
+async def forex_lab_results(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    return {"results": forex_lab.results(), "state": forex_lab.public_state()}
+
+
+@app.post("/api/forex-lab/start")
+async def forex_lab_start(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await forex_lab.start()
+    if not forex_lab.state.running and forex_lab.state.stage == "waiting_credentials":
+        raise HTTPException(status_code=503, detail=forex_lab.state.message)
+    return forex_lab.public_state()
+
+
+@app.post("/api/forex-lab/stop")
+async def forex_lab_stop(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    await forex_lab.stop()
+    return forex_lab.public_state()
 
 
 @app.get("/", response_class=HTMLResponse)
