@@ -341,6 +341,152 @@ class CTraderClient:
 
         return out[-max_bars:]
 
+    @staticmethod
+    def _decode_tick_rows(rows: list[dict], digits: int) -> list[tuple[int, float]]:
+        """Decode cTrader tick timestamps.
+
+        cTrader returns newest-first. The first row has an absolute timestamp;
+        subsequent timestamp values are positive deltas from the previous row.
+        """
+        if not rows:
+            return []
+        out: list[tuple[int, float]] = []
+        current_ms = int(rows[0].get("timestamp") or 0)
+        if current_ms <= 0:
+            return []
+        first_price = round(int(rows[0].get("tick") or 0) / 100000.0, digits)
+        out.append((current_ms, first_price))
+        for row in rows[1:]:
+            delta = int(row.get("timestamp") or 0)
+            current_ms -= max(0, delta)
+            price = round(int(row.get("tick") or 0) / 100000.0, digits)
+            out.append((current_ms, price))
+        out.sort(key=lambda x: x[0])
+        return out
+
+    async def historical_ticks(
+        self,
+        pair: str,
+        *,
+        quote_type: str,
+        start: datetime,
+        end: datetime,
+        max_ticks: int = 250000,
+    ) -> list[tuple[int, float]]:
+        """Fetch historical BID or ASK ticks.
+
+        cTrader limits each historical tick request to at most one week and to
+        a backend-defined row count. We page backwards within each week and
+        throttle below the documented historical-data request limit.
+        """
+        if quote_type.lower() not in {"bid", "ask"}:
+            raise CTraderError("quote_type must be 'bid' or 'ask'")
+        if not self.account_authenticated or not self.account_id:
+            await self.connect_and_authenticate()
+
+        symbol = await self.resolve_symbol(pair)
+        symbol_id = int(symbol["symbolId"])
+        digits = int(symbol.get("digits") or 5)
+        qtype = 1 if quote_type.lower() == "bid" else 2
+
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        if end <= start:
+            return []
+
+        overall_start_ms = int(start.timestamp() * 1000)
+        overall_end_ms = int(end.timestamp() * 1000)
+        out: list[tuple[int, float]] = []
+        seen: set[tuple[int, float]] = set()
+
+        window_end = overall_end_ms
+        week_ms = 7 * 24 * 60 * 60 * 1000
+        while window_end >= overall_start_ms and len(out) < max_ticks:
+            window_start = max(overall_start_ms, window_end - week_ms + 1)
+            cursor_to = window_end
+
+            while cursor_to >= window_start and len(out) < max_ticks:
+                await self._send(2145, {
+                    "ctidTraderAccountId": self.account_id,
+                    "symbolId": symbol_id,
+                    "type": qtype,
+                    "fromTimestamp": window_start,
+                    "toTimestamp": cursor_to,
+                })
+                message = await self._recv_until(2146, timeout=30.0)
+                payload = message.get("payload") or {}
+                rows = list(payload.get("tickData") or [])
+                decoded = self._decode_tick_rows(rows, digits)
+                if not decoded:
+                    break
+
+                for item in decoded:
+                    if window_start <= item[0] <= cursor_to and item not in seen:
+                        seen.add(item)
+                        out.append(item)
+                        if len(out) >= max_ticks:
+                            break
+
+                oldest = min(x[0] for x in decoded)
+                if not payload.get("hasMore"):
+                    break
+                next_cursor = oldest - 1
+                if next_cursor >= cursor_to:
+                    break
+                cursor_to = next_cursor
+                await asyncio.sleep(0.22)
+
+            window_end = window_start - 1
+            await asyncio.sleep(0.22)
+
+        out.sort(key=lambda x: x[0])
+        return out[-max_ticks:]
+
+    async def historical_quote_ticks(
+        self,
+        pair: str,
+        *,
+        lookback_days: int = 7,
+        max_ticks_per_side: int = 250000,
+    ) -> list[tuple[int, float, float]]:
+        """Return compact (timestamp_ms, bid, ask) quote ticks.
+
+        Bid and ask feeds update independently, so each event carries forward
+        the latest quote on the opposite side. Rows before both sides are known
+        are discarded.
+        """
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=max(1, lookback_days))
+        bid_rows = await self.historical_ticks(
+            pair, quote_type="bid", start=start, end=now,
+            max_ticks=max_ticks_per_side,
+        )
+        ask_rows = await self.historical_ticks(
+            pair, quote_type="ask", start=start, end=now,
+            max_ticks=max_ticks_per_side,
+        )
+
+        events = [(t, 0, px) for t, px in bid_rows]
+        events.extend((t, 1, px) for t, px in ask_rows)
+        events.sort(key=lambda x: (x[0], x[1]))
+
+        last_bid = None
+        last_ask = None
+        quotes: list[tuple[int, float, float]] = []
+        last_tuple = None
+        for ts, side, px in events:
+            if side == 0:
+                last_bid = px
+            else:
+                last_ask = px
+            if last_bid is None or last_ask is None:
+                continue
+            row = (int(ts), float(last_bid), float(last_ask))
+            if row != last_tuple and last_ask >= last_bid:
+                quotes.append(row)
+                last_tuple = row
+        return quotes
+
     async def disconnect(self) -> None:
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
