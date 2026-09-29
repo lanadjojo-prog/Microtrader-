@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -169,13 +170,17 @@ class CTraderClient:
             await self._send(2149, {"accessToken": token})
             accounts_message = await self._recv_until(2150)
             accounts = (accounts_message.get("payload") or {}).get("ctidTraderAccount") or []
-            ids = [
-                int(row.get("ctidTraderAccountId"))
-                for row in accounts
+            want_live = self.settings.ctrader_environment == "live"
+            eligible_accounts = [
+                row for row in accounts
                 if row.get("ctidTraderAccountId") is not None
+                and bool(row.get("isLive", False)) == want_live
             ]
+            ids = [int(row["ctidTraderAccountId"]) for row in eligible_accounts]
             if not ids:
-                raise CTraderError("No cTrader accounts are authorized for this access token")
+                raise CTraderError(
+                    f"No {self.settings.ctrader_environment} cTrader accounts are authorized for this token"
+                )
 
             configured = int(self.settings.ctrader_account_id) if self.settings.ctrader_account_id else None
             if configured is not None and configured not in ids:
@@ -207,6 +212,119 @@ class CTraderClient:
         except Exception as exc:
             self.last_error = str(exc)
             self.connected = False
+
+    async def symbols(self) -> list[dict]:
+        if not self.account_authenticated or not self.account_id:
+            await self.connect_and_authenticate()
+        await self._send(2114, {
+            "ctidTraderAccountId": self.account_id,
+            "includeArchivedSymbols": False,
+        })
+        message = await self._recv_until(2115)
+        return list((message.get("payload") or {}).get("symbol") or [])
+
+    async def symbol_details(self, symbol_ids: list[int]) -> list[dict]:
+        if not self.account_authenticated or not self.account_id:
+            await self.connect_and_authenticate()
+        if not symbol_ids:
+            return []
+        await self._send(2116, {
+            "ctidTraderAccountId": self.account_id,
+            "symbolId": [int(x) for x in symbol_ids],
+        })
+        message = await self._recv_until(2117)
+        return list((message.get("payload") or {}).get("symbol") or [])
+
+    async def resolve_symbol(self, pair: str) -> dict:
+        wanted = pair.upper().replace("/", "").replace("-", "").replace("_", "")
+        symbols = await self.symbols()
+        for row in symbols:
+            name = str(row.get("symbolName") or "")
+            normalized = name.upper().replace("/", "").replace("-", "").replace("_", "")
+            if normalized == wanted:
+                details = await self.symbol_details([int(row["symbolId"])])
+                detail = details[0] if details else {}
+                return {**row, **detail}
+        raise CTraderError(f"Symbol {pair} is not available on this cTrader account")
+
+    async def historical_bars(
+        self,
+        pair: str,
+        *,
+        timeframe_min: int = 1,
+        max_bars: int = 5000,
+        lookback_days: int = 90,
+    ) -> list[dict]:
+        """Load cTrader trendbars and normalize them to MicroTrader OHLC format."""
+        period_map = {
+            1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 10: 6, 15: 7,
+            30: 8, 60: 9, 240: 10, 720: 11, 1440: 12,
+        }
+        if timeframe_min not in period_map:
+            raise CTraderError(f"Unsupported cTrader timeframe: {timeframe_min} minutes")
+        if not self.account_authenticated or not self.account_id:
+            await self.connect_and_authenticate()
+
+        symbol = await self.resolve_symbol(pair)
+        symbol_id = int(symbol["symbolId"])
+        digits = int(symbol.get("digits") or 5)
+        period = period_map[timeframe_min]
+
+        now = datetime.now(timezone.utc)
+        from_ms = int((now - timedelta(days=max(1, lookback_days))).timestamp() * 1000)
+        cursor_to = int(now.timestamp() * 1000)
+        out: list[dict] = []
+
+        while len(out) < max_bars:
+            remaining = max_bars - len(out)
+            await self._send(2137, {
+                "ctidTraderAccountId": self.account_id,
+                "fromTimestamp": from_ms,
+                "toTimestamp": cursor_to,
+                "period": period,
+                "symbolId": symbol_id,
+                "count": min(5000, remaining),
+            })
+            message = await self._recv_until(2138, timeout=30.0)
+            payload = message.get("payload") or {}
+            trendbars = list(payload.get("trendbar") or [])
+            if not trendbars:
+                break
+
+            batch: list[dict] = []
+            for row in trendbars:
+                low_raw = int(row.get("low") or 0)
+                low = round(low_raw / 100000.0, digits)
+                open_px = round((low_raw + int(row.get("deltaOpen") or 0)) / 100000.0, digits)
+                high = round((low_raw + int(row.get("deltaHigh") or 0)) / 100000.0, digits)
+                close = round((low_raw + int(row.get("deltaClose") or 0)) / 100000.0, digits)
+                minute_ts = int(row.get("utcTimestampInMinutes") or 0)
+                ts = datetime.fromtimestamp(minute_ts * 60, tz=timezone.utc).isoformat()
+                batch.append({
+                    "t": ts,
+                    "o": open_px,
+                    "h": high,
+                    "l": low,
+                    "c": close,
+                    "v": float(row.get("volume") or 0),
+                    "pair": pair,
+                })
+
+            batch.sort(key=lambda x: x["t"])
+            existing = {x["t"] for x in out}
+            new_rows = [x for x in batch if x["t"] not in existing]
+            out = new_rows + out
+            out.sort(key=lambda x: x["t"])
+            if not payload.get("hasMore") or not new_rows:
+                break
+            oldest = datetime.fromisoformat(new_rows[0]["t"])
+            next_cursor = int((oldest - timedelta(milliseconds=1)).timestamp() * 1000)
+            if next_cursor >= cursor_to:
+                break
+            cursor_to = next_cursor
+            await asyncio.sleep(0.22)
+
+        return out[-max_bars:]
 
     async def disconnect(self) -> None:
         if self._heartbeat_task and not self._heartbeat_task.done():
