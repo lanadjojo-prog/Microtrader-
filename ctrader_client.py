@@ -150,7 +150,7 @@ class CTraderClient:
                 raw = raw.decode("utf-8")
             message = json.loads(raw)
             payload_type = int(message.get("payloadType") or 0)
-            if payload_type == 50:
+            if payload_type in {50, 2142}:
                 payload = message.get("payload") or {}
                 raise CTraderError(
                     f"{payload.get('errorCode', 'OPEN_API_ERROR')}: "
