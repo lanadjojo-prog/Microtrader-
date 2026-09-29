@@ -70,7 +70,7 @@ class Settings:
     research_agent_interval_seconds: int = _int("RESEARCH_AGENT_INTERVAL_SECONDS", 60)
     research_agent_focus_families: int = _int("RESEARCH_AGENT_FOCUS_FAMILIES", 4)
 
-    # Forex-first research / Fusion Markets via cTrader Open API
+    # Forex-first research. External data is deliberately separate from broker execution.
     forex_first: bool = _bool("FOREX_FIRST", False)
     forex_lab_auto_start: bool = _bool("FOREX_LAB_AUTO_START", False)
     forex_pairs_raw: str = os.getenv("FOREX_PAIRS", "EUR/USD,GBP/USD,USD/JPY")
@@ -87,6 +87,19 @@ class Settings:
     forex_max_retail_leverage: float = _float("FOREX_MAX_RETAIL_LEVERAGE", 30.0)
     forex_min_lot: float = _float("FOREX_MIN_LOT", 0.01)
 
+    # Read-only market-data layer for testing. external/auto uses Dukascopy and
+    # optionally overlays recent Twelve Data bars when a key is configured.
+    forex_data_provider: str = os.getenv("FOREX_DATA_PROVIDER", "external").strip().lower()
+    twelve_data_api_key: str = os.getenv("TWELVE_DATA_API_KEY", "").strip()
+    twelve_data_base_url: str = os.getenv(
+        "TWELVE_DATA_BASE_URL", "https://api.twelvedata.com"
+    ).strip()
+    dukascopy_base_urls_raw: str = os.getenv(
+        "DUKASCOPY_BASE_URLS",
+        "https://datafeed.dukascopy.com/datafeed,https://www.dukascopy.com/datafeed",
+    )
+
+    # cTrader / Fusion demo validation layer.
     ctrader_environment: str = os.getenv("CTRADER_ENVIRONMENT", "demo").strip().lower()
     ctrader_demo_only: bool = _bool("CTRADER_DEMO_ONLY", True)
     ctrader_oauth_scope: str = os.getenv("CTRADER_OAUTH_SCOPE", "accounts").strip().lower()
@@ -102,6 +115,7 @@ class Settings:
 
     # Precision Lab: separate tight-stop tester using bid/ask tick execution.
     precision_lab_auto_start: bool = _bool("PRECISION_LAB_AUTO_START", False)
+    precision_data_provider: str = os.getenv("PRECISION_DATA_PROVIDER", "external").strip().lower()
     precision_pairs_raw: str = os.getenv("PRECISION_PAIRS", "EUR/USD")
     precision_lookback_days: int = _int("PRECISION_LOOKBACK_DAYS", 7)
     precision_max_bars_per_pair: int = _int("PRECISION_MAX_BARS_PER_PAIR", 12000)
@@ -143,6 +157,10 @@ class Settings:
     @property
     def forex_pairs(self) -> List[str]:
         return [s.strip().upper() for s in self.forex_pairs_raw.split(",") if s.strip()]
+
+    @property
+    def dukascopy_base_urls(self) -> List[str]:
+        return [s.strip() for s in self.dukascopy_base_urls_raw.split(",") if s.strip()]
 
     @property
     def ctrader_configured(self) -> bool:
