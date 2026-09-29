@@ -293,6 +293,16 @@ async def ctrader_connect(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=503, detail=str(exc))
 
 
+@app.get("/api/ctrader/diagnostics")
+async def ctrader_diagnostics(authorization: str | None = Header(default=None)):
+    require_token(authorization)
+    try:
+        pairs = list(dict.fromkeys(settings.forex_pairs + settings.precision_pairs))
+        return await ctrader.diagnostics(pairs)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
 @app.get("/ctrader/callback", response_class=HTMLResponse)
 async def ctrader_callback(code: str = ""):
     if not code:
