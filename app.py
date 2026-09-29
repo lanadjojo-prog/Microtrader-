@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from alpaca_client import AlpacaClient
 from config import settings
@@ -303,6 +303,18 @@ async def ctrader_diagnostics(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=503, detail=str(exc))
 
 
+@app.get("/ctrader/start")
+async def ctrader_start():
+    try:
+        return RedirectResponse(ctrader.authorization_url())
+    except CTraderError as exc:
+        return HTMLResponse(
+            "<h3>cTrader authorization is not ready</h3>"
+            f"<p>{str(exc)}</p>",
+            status_code=503,
+        )
+
+
 @app.get("/ctrader/callback", response_class=HTMLResponse)
 async def ctrader_callback(code: str = ""):
     if not code:
@@ -312,13 +324,24 @@ async def ctrader_callback(code: str = ""):
         )
     try:
         token_data = await ctrader.exchange_code(code)
+        state = await ctrader.connect_and_authenticate()
+        diagnostics = await ctrader.diagnostics(
+            list(dict.fromkeys(settings.forex_pairs + settings.precision_pairs))
+        )
         expires = token_data.get("expiresIn")
+        symbol_names = ", ".join(
+            key for key, value in (diagnostics.get("symbols") or {}).items()
+            if not value.get("error")
+        ) or "none"
         return HTMLResponse(
-            "<h3>cTrader demo authorization complete</h3>"
-            "<p>MicroTrader has loaded the access token into this running instance. "
-            "You can close this window and test the connection from the dashboard.</p>"
+            "<h3>Fusion Markets demo connected</h3>"
+            "<p>MicroTrader is now authenticated through cTrader with read-only account access.</p>"
+            f"<p>Environment: {state.get('environment', '-')} · "
+            f"Account ID: {state.get('account_id', '-')}</p>"
+            f"<p>Verified symbols: {symbol_names}</p>"
             f"<p>Token lifetime reported by cTrader: {expires or '-'} seconds.</p>"
-            "<p>No token or client secret is displayed on this page.</p>"
+            "<p>No access token, refresh token, client ID, or client secret is displayed.</p>"
+            "<p>You can close this window and return to ChatGPT.</p>"
         )
     except Exception as exc:
         return HTMLResponse(
