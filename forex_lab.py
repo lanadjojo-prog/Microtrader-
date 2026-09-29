@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -138,9 +140,16 @@ class ForexStrategyLab:
             seen = await self.store.load_signatures()
 
             source = await self._load_source_data()
+            configured_candidates = [
+                ForexCandidate(
+                    candidate.strategy,
+                    {**candidate.params, "risk_eur": self.settings.forex_risk_eur},
+                )
+                for candidate in candidate_grid()
+            ]
             all_candidates = [
-                candidate for candidate in candidate_grid()
-                if candidate_signature(candidate) not in seen
+                candidate for candidate in configured_candidates
+                if evaluation_signature(candidate, source) not in seen
             ]
             batch_size = max(1, self.settings.forex_lab_batch_size)
             batch = all_candidates[:batch_size]
@@ -181,10 +190,8 @@ class ForexStrategyLab:
                     min_payoff_ratio=self.settings.forex_min_payoff_ratio,
                     start_capital=self.settings.forex_start_capital,
                 )
-                result["risk_model"]["fixed_risk_eur"] = self.settings.forex_risk_eur
-                result["params"]["risk_eur"] = self.settings.forex_risk_eur
-
-                signature = candidate_signature(candidate)
+                signature = evaluation_signature(candidate, source)
+                result["dataset"]["version"] = dataset_version(source)
                 run_id = await self.store.save_run(signature, result)
                 if run_id:
                     result["run_id"] = run_id
@@ -252,6 +259,27 @@ class ForexStrategyLab:
             self.state.current_params = None
             self.state.current_pair = ""
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
+
+
+def dataset_version(bars_by_pair: Dict[str, List[dict]]) -> str:
+    payload = {
+        pair: {
+            "count": len(bars),
+            "first": str(bars[0].get("t") or "") if bars else "",
+            "last": str(bars[-1].get("t") or "") if bars else "",
+        }
+        for pair, bars in sorted(bars_by_pair.items())
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def evaluation_signature(
+    candidate: ForexCandidate,
+    bars_by_pair: Dict[str, List[dict]],
+) -> str:
+    raw = candidate_signature(candidate) + ":" + dataset_version(bars_by_pair)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def aggregate_bars(bars: List[dict], minutes: int) -> List[dict]:
