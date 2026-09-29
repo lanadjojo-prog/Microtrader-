@@ -70,6 +70,50 @@ class Settings:
     research_agent_interval_seconds: int = _int("RESEARCH_AGENT_INTERVAL_SECONDS", 60)
     research_agent_focus_families: int = _int("RESEARCH_AGENT_FOCUS_FAMILIES", 4)
 
+    # Forex-first research / Fusion Markets via cTrader Open API
+    forex_first: bool = _bool("FOREX_FIRST", False)
+    forex_lab_auto_start: bool = _bool("FOREX_LAB_AUTO_START", False)
+    forex_pairs_raw: str = os.getenv("FOREX_PAIRS", "EUR/USD,GBP/USD,USD/JPY")
+    forex_start_capital: float = _float("FOREX_START_CAPITAL_EUR", 50.0)
+    forex_risk_eur: float = _float("FOREX_RISK_EUR", 0.75)
+    forex_cost_bps: float = _float("FOREX_COST_BPS", 0.50)
+    forex_stress_cost_multiplier: float = _float("FOREX_STRESS_COST_MULTIPLIER", 2.0)
+    forex_lookback_days: int = _int("FOREX_LOOKBACK_DAYS", 120)
+    forex_max_bars_per_pair: int = _int("FOREX_MAX_BARS_PER_PAIR", 12000)
+    forex_lab_batch_size: int = _int("FOREX_LAB_BATCH_SIZE", 12)
+    forex_min_oos_trades: int = _int("FOREX_MIN_OOS_TRADES", 60)
+    forex_min_profit_factor: float = _float("FOREX_MIN_PROFIT_FACTOR", 1.25)
+    forex_min_payoff_ratio: float = _float("FOREX_MIN_PAYOFF_RATIO", 1.80)
+    forex_max_retail_leverage: float = _float("FOREX_MAX_RETAIL_LEVERAGE", 30.0)
+    forex_min_lot: float = _float("FOREX_MIN_LOT", 0.01)
+
+    ctrader_environment: str = os.getenv("CTRADER_ENVIRONMENT", "demo").strip().lower()
+    ctrader_demo_only: bool = _bool("CTRADER_DEMO_ONLY", True)
+    ctrader_oauth_scope: str = os.getenv("CTRADER_OAUTH_SCOPE", "accounts").strip().lower()
+    ctrader_client_id: str = os.getenv("CTRADER_CLIENT_ID", "")
+    ctrader_client_secret: str = os.getenv("CTRADER_CLIENT_SECRET", "")
+    ctrader_redirect_uri: str = os.getenv(
+        "CTRADER_REDIRECT_URI",
+        "https://microtrader-6thu.onrender.com/ctrader/callback",
+    )
+    ctrader_access_token: str = os.getenv("CTRADER_ACCESS_TOKEN", "")
+    ctrader_refresh_token: str = os.getenv("CTRADER_REFRESH_TOKEN", "")
+    ctrader_account_id: str = os.getenv("CTRADER_ACCOUNT_ID", "")
+
+    # Precision Lab: separate tight-stop tester using bid/ask tick execution.
+    precision_lab_auto_start: bool = _bool("PRECISION_LAB_AUTO_START", False)
+    precision_pairs_raw: str = os.getenv("PRECISION_PAIRS", "EUR/USD")
+    precision_lookback_days: int = _int("PRECISION_LOOKBACK_DAYS", 7)
+    precision_max_bars_per_pair: int = _int("PRECISION_MAX_BARS_PER_PAIR", 12000)
+    precision_max_ticks_per_side: int = _int("PRECISION_MAX_TICKS_PER_SIDE", 250000)
+    precision_batch_size: int = _int("PRECISION_BATCH_SIZE", 12)
+    precision_start_capital: float = _float("PRECISION_START_CAPITAL_EUR", 50.0)
+    precision_risk_eur: float = _float("PRECISION_RISK_EUR", 0.75)
+    precision_commission_pips: float = _float("PRECISION_COMMISSION_PIPS", 0.50)
+    precision_stress_multiplier: float = _float("PRECISION_STRESS_MULTIPLIER", 2.0)
+    precision_min_oos_trades: int = _int("PRECISION_MIN_OOS_TRADES", 40)
+    precision_min_profit_factor: float = _float("PRECISION_MIN_PROFIT_FACTOR", 1.20)
+
     # Crypto / microstructure lab (public Bitvavo data, simulation-only)
     crypto_lab_auto_start: bool = _bool("CRYPTO_LAB_AUTO_START", False)
     crypto_lab_symbols_raw: str = os.getenv("CRYPTO_LAB_SYMBOLS", "BTC-EUR,ETH-EUR,SOL-EUR,BTC-USDC,ETH-USDC,SOL-USDC")
@@ -95,6 +139,22 @@ class Settings:
     @property
     def lab_symbols(self) -> List[str]:
         return [s.strip().upper() for s in self.lab_symbols_raw.split(",") if s.strip()]
+
+    @property
+    def forex_pairs(self) -> List[str]:
+        return [s.strip().upper() for s in self.forex_pairs_raw.split(",") if s.strip()]
+
+    @property
+    def ctrader_configured(self) -> bool:
+        return bool(
+            self.ctrader_client_id
+            and self.ctrader_client_secret
+            and self.ctrader_access_token
+        )
+
+    @property
+    def precision_pairs(self) -> List[str]:
+        return [s.strip().upper() for s in self.precision_pairs_raw.split(",") if s.strip()]
 
     @property
     def crypto_lab_symbols(self) -> List[str]:
