@@ -279,7 +279,7 @@ async def ctrader_status(authorization: str | None = Header(default=None)):
 async def ctrader_oauth_url(authorization: str | None = Header(default=None)):
     require_token(authorization)
     try:
-        return {"url": ctrader.authorization_url("trading")}
+        return {"url": ctrader.authorization_url()}
     except CTraderError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
