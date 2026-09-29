@@ -144,7 +144,25 @@ class PrecisionStrategyLab:
                 log.warning("Precision Lab skipped %s: only %s quote ticks", pair, len(ticks))
                 continue
 
-            bars_by_pair[pair] = bars
+            tick_start = ticks[0][0]
+            tick_end = ticks[-1][0]
+            aligned_bars = []
+            for bar in bars:
+                try:
+                    dt = datetime.fromisoformat(str(bar.get("t") or "").replace("Z", "+00:00"))
+                    ms = int(dt.timestamp() * 1000)
+                except Exception:
+                    continue
+                if tick_start <= ms <= tick_end:
+                    aligned_bars.append(bar)
+            if len(aligned_bars) < 300:
+                log.warning(
+                    "Precision Lab skipped %s: only %s bars overlap tick coverage",
+                    pair, len(aligned_bars),
+                )
+                continue
+
+            bars_by_pair[pair] = aligned_bars
             ticks_by_pair[pair] = ticks
             self.state.pairs_loaded += 1
             self.state.bars_loaded += len(bars)
