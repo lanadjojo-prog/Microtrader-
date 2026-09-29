@@ -325,6 +325,7 @@ def execute_signals(
     ticks: List[QuoteTick],
     pair: str,
     commission_pips_roundtrip: float,
+    start_capital: float = 50.0,
 ) -> List[dict]:
     """Execute pending entries and exits against bid/ask ticks.
 
@@ -435,7 +436,7 @@ def execute_signals(
             "r_multiple": round(r_multiple, 4),
             "pnl": round(r_multiple * risk_eur, 4),
             "risk_eur": risk_eur,
-            "net_return": round((r_multiple * risk_eur) / 50.0, 8),
+            "net_return": round((r_multiple * risk_eur) / max(0.01, start_capital), 8),
             "exit_reason": exit_reason,
         })
         unavailable_until = ticks[exit_idx][0]
@@ -484,14 +485,14 @@ def evaluate_candidate(
         train_signals = generate_signals(candidate, pair, tr_bars)
         oos_signals = generate_signals(candidate, pair, te_bars)
         train_exec = execute_signals(
-            train_signals, ticks, pair, commission_pips_roundtrip
+            train_signals, ticks, pair, commission_pips_roundtrip, start_capital
         )
         oos_exec = execute_signals(
-            oos_signals, ticks, pair, commission_pips_roundtrip
+            oos_signals, ticks, pair, commission_pips_roundtrip, start_capital
         )
         stress_exec = execute_signals(
             oos_signals, ticks, pair,
-            commission_pips_roundtrip * stress_multiplier,
+            commission_pips_roundtrip * stress_multiplier, start_capital,
         )
 
         train_trades.extend(train_exec)
