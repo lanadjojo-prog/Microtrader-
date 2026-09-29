@@ -88,6 +88,8 @@ class Settings:
     forex_min_lot: float = _float("FOREX_MIN_LOT", 0.01)
 
     ctrader_environment: str = os.getenv("CTRADER_ENVIRONMENT", "demo").strip().lower()
+    ctrader_demo_only: bool = _bool("CTRADER_DEMO_ONLY", True)
+    ctrader_oauth_scope: str = os.getenv("CTRADER_OAUTH_SCOPE", "accounts").strip().lower()
     ctrader_client_id: str = os.getenv("CTRADER_CLIENT_ID", "")
     ctrader_client_secret: str = os.getenv("CTRADER_CLIENT_SECRET", "")
     ctrader_redirect_uri: str = os.getenv(
