@@ -11,13 +11,7 @@ from typing import Dict, List, Optional
 from config import Settings
 from ctrader_client import CTraderClient
 from forex_data import ExternalForexData
-from precision_backtest import (
-    PrecisionCandidate,
-    QuoteTick,
-    candidate_grid,
-    candidate_signature,
-    evaluate_candidate,
-)
+from precision_backtest import PrecisionCandidate, QuoteTick, candidate_grid, candidate_signature, evaluate_candidate
 from precision_store import PrecisionStrategyStore
 
 log = logging.getLogger("microtrader.precision_lab")
@@ -48,14 +42,9 @@ class PrecisionLabState:
 
 
 class PrecisionStrategyLab:
-    """Separate tight-stop research tester using bid/ask tick execution."""
+    """Persistent tight-stop research worker; never places orders."""
 
-    def __init__(
-        self,
-        settings: Settings,
-        client: CTraderClient,
-        external_data: Optional[ExternalForexData] = None,
-    ):
+    def __init__(self, settings: Settings, client: CTraderClient, external_data: Optional[ExternalForexData] = None):
         self.settings = settings
         self.client = client
         self.external_data = external_data or ExternalForexData(settings)
@@ -68,17 +57,19 @@ class PrecisionStrategyLab:
 
     def public_state(self) -> dict:
         payload = asdict(self.state)
-        payload["broker"] = self.client.public_state()
-        payload["market_data"] = self.external_data.public_state()
-        payload["data_provider"] = self.settings.precision_data_provider
-        payload["pairs"] = self.settings.precision_pairs
-        payload["start_capital_eur"] = self.settings.precision_start_capital
-        payload["risk_eur"] = self.settings.precision_risk_eur
-        payload["stop_pips"] = [3, 4]
-        payload["target_pips"] = [5, 6, 7, 8, 9, 10]
-        payload["commission_pips_roundtrip"] = self.settings.precision_commission_pips
-        payload["tick_execution"] = True
-        payload["results_loaded"] = len(self._results)
+        payload.update({
+            "broker": self.client.public_state(),
+            "market_data": self.external_data.public_state(),
+            "data_provider": self.settings.precision_data_provider,
+            "pairs": self.settings.precision_pairs,
+            "start_capital_eur": self.settings.precision_start_capital,
+            "risk_eur": [2.0, 3.0],
+            "stop_pips": [2, 3, 4, 5],
+            "target_pips": [4, 5, 6, 7, 8, 9, 10],
+            "commission_pips_roundtrip": self.settings.precision_commission_pips,
+            "tick_execution": True,
+            "results_loaded": len(self._results),
+        })
         return payload
 
     def results(self) -> List[dict]:
@@ -91,13 +82,7 @@ class PrecisionStrategyLab:
             self.state.stage = "waiting_credentials"
             self.state.message = "PRECISION_DATA_PROVIDER=ctrader requires cTrader access."
             return
-        self.state = PrecisionLabState(
-            running=True,
-            stage="starting",
-            message="Preparing Precision Lab",
-            started_at=datetime.now(timezone.utc).isoformat(),
-            pairs_total=len(self.settings.precision_pairs),
-        )
+        self.state = PrecisionLabState(running=True, stage="starting", message="Preparing Precision Lab", started_at=datetime.now(timezone.utc).isoformat(), pairs_total=len(self.settings.precision_pairs))
         self._task = asyncio.create_task(self._run(), name="microtrader-precision-lab")
 
     async def stop(self) -> None:
@@ -119,82 +104,120 @@ class PrecisionStrategyLab:
         use_ctrader = self.settings.precision_data_provider == "ctrader"
         if use_ctrader:
             await self.client.connect_and_authenticate()
-
         for pair in self.settings.precision_pairs:
             self.state.current_pair = pair
-            self.state.message = f"Loading 1m bars for {pair}"
             if use_ctrader:
                 bars = await self.client.historical_bars(pair, timeframe_min=1, max_bars=self.settings.precision_max_bars_per_pair, lookback_days=self.settings.precision_lookback_days)
-            else:
-                bars = await self.external_data.historical_bars(pair, max_bars=self.settings.precision_max_bars_per_pair, lookback_days=self.settings.precision_lookback_days)
-            if len(bars) < 300:
-                log.warning("Precision Lab skipped %s: only %s bars", pair, len(bars))
-                continue
-
-            self.state.message = f"Loading bid/ask ticks for {pair}"
-            if use_ctrader:
                 ticks = await self.client.historical_quote_ticks(pair, lookback_days=self.settings.precision_lookback_days, max_ticks_per_side=self.settings.precision_max_ticks_per_side)
             else:
+                bars = await self.external_data.historical_bars(pair, max_bars=self.settings.precision_max_bars_per_pair, lookback_days=self.settings.precision_lookback_days)
                 ticks = await self.external_data.historical_quote_ticks(pair, lookback_days=self.settings.precision_lookback_days, max_ticks=self.settings.precision_max_ticks_per_side * 2)
-            if len(ticks) < 1000:
-                log.warning("Precision Lab skipped %s: only %s quote ticks", pair, len(ticks))
+            if len(bars) < 300 or len(ticks) < 1000:
                 continue
-
             tick_start, tick_end = ticks[0][0], ticks[-1][0]
-            aligned_bars = []
+            aligned = []
             for bar in bars:
-                raw = str(bar.get("t") or "")
                 try:
-                    ts = int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp() * 1000)
-                except ValueError:
+                    ms = int(datetime.fromisoformat(str(bar.get("t") or "").replace("Z", "+00:00")).timestamp() * 1000)
+                except Exception:
                     continue
-                if tick_start <= ts <= tick_end:
-                    aligned_bars.append(bar)
-            if len(aligned_bars) < 300:
+                if tick_start <= ms <= tick_end:
+                    aligned.append(bar)
+            if len(aligned) < 300:
                 continue
-            bars_by_pair[pair] = aligned_bars
-            ticks_by_pair[pair] = ticks
+            bars_by_pair[pair], ticks_by_pair[pair] = aligned, ticks
             self.state.pairs_loaded = len(bars_by_pair)
-            self.state.bars_loaded += len(aligned_bars)
+            self.state.bars_loaded += len(aligned)
             self.state.quote_ticks_loaded += len(ticks)
-
+        self.state.current_pair = ""
+        if not bars_by_pair:
+            raise RuntimeError("No precision research data available")
         self._bars, self._ticks = bars_by_pair, ticks_by_pair
         return bars_by_pair, ticks_by_pair
 
     async def _run(self) -> None:
         try:
-            bars_by_pair, ticks_by_pair = await self._load_data()
-            if not bars_by_pair:
-                raise RuntimeError("No precision research data available")
-            candidates = candidate_grid(self.settings)
-            self.state.total = len(candidates)
+            await self.store.init()
+            saved = await self.store.load_state()
+            self.state.generation = int(saved.get("generation", 0))
+            self.state.tested_total = int(saved.get("tested_total", 0))
+            self.state.deep_search_total = int(saved.get("deep_search_total", 0))
+            self._results = await self.store.load_results(limit=250)
+            seen = await self.store.load_signatures()
+            bars, ticks = await self._load_data()
+            version = dataset_version(bars, ticks)
+
+            configured: List[PrecisionCandidate] = []
+            # Expand the existing mechanical signal families across the agreed
+            # 2-5 pip stop, 4-10 pip target and EUR 2/3 fixed-risk grid.
+            templates = candidate_grid()
+            by_strategy = {}
+            for c in templates:
+                by_strategy.setdefault(c.strategy, c)
+            for base in by_strategy.values():
+                for stop in (2.0, 3.0, 4.0, 5.0):
+                    for target in (4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0):
+                        for risk in (2.0, 3.0):
+                            configured.append(PrecisionCandidate(base.strategy, {**base.params, "stop_pips": stop, "target_pips": target, "risk_eur": risk, "_phase": "precision_economics"}))
+
+            remaining = [c for c in configured if evaluation_signature(c, version) not in seen]
+            if not remaining:
+                self.state.stage = "search_exhausted"
+                self.state.message = "All configured precision candidates have been tested on this dataset version."
+                return
+
+            self.state.generation += 1
             self.state.stage = "testing"
-            for idx, candidate in enumerate(candidates, 1):
+            self.state.total = len(remaining)
+            for idx, candidate in enumerate(remaining, 1):
                 if not self.state.running:
                     break
                 self.state.progress = idx
-                self.state.current_candidate = candidate_signature(candidate)
-                self.state.current_params = asdict(candidate)
-                result = evaluate_candidate(candidate, bars_by_pair, ticks_by_pair, self.settings)
+                self.state.current_candidate = candidate.strategy
+                self.state.current_params = dict(candidate.params)
+                self.state.message = f"Precision {idx}/{len(remaining)} · {candidate.strategy} · {candidate.params['stop_pips']}p/{candidate.params['target_pips']}p · EUR {candidate.params['risk_eur']} risk"
+                result = await asyncio.to_thread(evaluate_candidate, candidate, bars, ticks, commission_pips_roundtrip=self.settings.precision_commission_pips, stress_multiplier=self.settings.precision_stress_multiplier, min_oos_trades=self.settings.precision_min_oos_trades, min_profit_factor=self.settings.precision_min_profit_factor, start_capital=self.settings.precision_start_capital)
+                result["dataset"]["version"] = version
+                result["dataset"]["source"] = self.settings.precision_data_provider
+                signature = evaluation_signature(candidate, version)
+                run_id = await self.store.save_run(signature, result)
+                clean = {k: v for k, v in result.items() if not k.startswith("_")}
+                if run_id:
+                    clean["run_id"] = run_id
                 self.state.tested_total += 1
-                payload = result if isinstance(result, dict) else asdict(result)
-                self._results.append(payload)
-                try:
-                    self.store.save(payload)
-                except Exception as exc:
-                    log.warning("Unable to persist precision result: %s", exc)
-                self.state.last_completed_candidate = self.state.current_candidate
+                if clean.get("funnel_stage") == "precision_deep_search":
+                    self.state.deep_search_total += 1
+                self.state.last_completed_candidate = candidate.strategy
                 self.state.last_completed_at = datetime.now(timezone.utc).isoformat()
-                await asyncio.sleep(0)
+                self._results.append(clean)
+                self._results.sort(key=lambda r: (float(r.get("funnel_score") or 0), float((r.get("oos") or {}).get("expectancy_r") or 0)), reverse=True)
+                self._results = self._results[:250]
+                await self.store.save_state(self.state.generation, self.state.tested_total, self.state.deep_search_total)
+                await asyncio.sleep(0.05)
             self.state.stage = "complete"
-            self.state.message = "Precision research run complete"
-            self.state.completed_at = datetime.now(timezone.utc).isoformat()
+            self.state.message = "Precision research grid complete; checkpoints saved after every candidate."
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.exception("Precision Lab failed")
             self.state.stage = "error"
             self.state.last_error = str(exc)
             self.state.message = str(exc)
+            log.exception("Precision Lab failed")
         finally:
             self.state.running = False
+            self.state.current_candidate = ""
+            self.state.current_params = None
+            self.state.current_pair = ""
+            self.state.completed_at = datetime.now(timezone.utc).isoformat()
+
+
+def dataset_version(bars: Dict[str, List[dict]], ticks: Dict[str, List[QuoteTick]]) -> str:
+    payload = {}
+    for pair in sorted(bars):
+        pb, pt = bars[pair], ticks.get(pair) or []
+        payload[pair] = {"bars": len(pb), "bar_first": str(pb[0].get("t") or "") if pb else "", "bar_last": str(pb[-1].get("t") or "") if pb else "", "ticks": len(pt), "tick_first": pt[0][0] if pt else 0, "tick_last": pt[-1][0] if pt else 0}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+
+
+def evaluation_signature(candidate: PrecisionCandidate, data_version: str) -> str:
+    return hashlib.sha256((candidate_signature(candidate) + ":" + data_version).encode()).hexdigest()
