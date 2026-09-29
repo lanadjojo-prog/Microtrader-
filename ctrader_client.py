@@ -38,6 +38,8 @@ class CTraderClient:
         self.account_authenticated = False
         self.account_id: Optional[int] = None
         self.last_error: Optional[str] = None
+        self._runtime_access_token: str = ""
+        self._runtime_refresh_token: str = ""
 
     @property
     def endpoint(self) -> str:
@@ -53,16 +55,25 @@ class CTraderClient:
         )
 
     @property
+    def active_access_token(self) -> str:
+        return self._runtime_access_token or self.settings.ctrader_access_token
+
+    @property
+    def active_refresh_token(self) -> str:
+        return self._runtime_refresh_token or self.settings.ctrader_refresh_token
+
+    @property
     def api_ready(self) -> bool:
-        return bool(self.oauth_ready and self.settings.ctrader_access_token)
+        return bool(self.oauth_ready and self.active_access_token)
 
     def public_state(self) -> dict:
         return {
             "environment": self.settings.ctrader_environment,
             "endpoint": self.endpoint,
             "oauth_ready": self.oauth_ready,
-            "access_token_configured": bool(self.settings.ctrader_access_token),
-            "refresh_token_configured": bool(self.settings.ctrader_refresh_token),
+            "access_token_configured": bool(self.active_access_token),
+            "refresh_token_configured": bool(self.active_refresh_token),
+            "runtime_token": bool(self._runtime_access_token),
             "account_id_configured": bool(self.settings.ctrader_account_id),
             "connected": self.connected,
             "application_authenticated": self.application_authenticated,
@@ -97,10 +108,12 @@ class CTraderClient:
         data = response.json()
         if data.get("errorCode"):
             raise CTraderError(f"{data.get('errorCode')}: {data.get('description')}")
+        self._runtime_access_token = str(data.get("accessToken") or "")
+        self._runtime_refresh_token = str(data.get("refreshToken") or "")
         return data
 
     async def refresh_access_token(self, refresh_token: Optional[str] = None) -> dict:
-        token = refresh_token or self.settings.ctrader_refresh_token
+        token = refresh_token or self.active_refresh_token
         if not self.oauth_ready or not token:
             raise CTraderError("cTrader refresh token or application credentials are missing")
         response = await self._http.post(self.TOKEN_URL, params={
@@ -113,6 +126,8 @@ class CTraderClient:
         data = response.json()
         if data.get("errorCode"):
             raise CTraderError(f"{data.get('errorCode')}: {data.get('description')}")
+        self._runtime_access_token = str(data.get("accessToken") or "")
+        self._runtime_refresh_token = str(data.get("refreshToken") or "")
         return data
 
     async def _send(self, payload_type: int, payload: Optional[dict] = None) -> str:
@@ -145,7 +160,7 @@ class CTraderClient:
                 return message
 
     async def connect_and_authenticate(self, access_token: Optional[str] = None) -> dict:
-        token = access_token or self.settings.ctrader_access_token
+        token = access_token or self.active_access_token
         if not self.oauth_ready or not token:
             raise CTraderError("cTrader client credentials and access token are required")
 
