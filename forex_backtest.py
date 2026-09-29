@@ -426,6 +426,14 @@ def evaluate_candidate(
         "positive_pair_ratio": round(positive_pair_ratio, 3),
         "positive_pairs": positive_pairs,
         "pair_count": len(per_pair),
+        "robustness": {
+            "positive_pair_ratio": round(positive_pair_ratio, 3),
+            "positive_pairs": positive_pairs,
+            "pair_count": len(per_pair),
+            "stress_cost_multiplier": stress_multiplier,
+            "cost_bps_per_side": cost_bps,
+            "conservative_same_bar_stop_first": True,
+        },
         "promoted": promoted,
         "rejection_reasons": reasons,
     }
