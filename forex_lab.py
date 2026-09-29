@@ -155,121 +155,123 @@ class ForexStrategyLab:
     async def _run(self) -> None:
         try:
             await self.store.init()
-            state = await self.store.load_state()
-            self.state.generation = int(state.get("generation", 0))
-            self.state.tested_total = int(state.get("tested_total", 0))
-            self.state.promoted_total = int(state.get("promoted_total", 0))
+            saved = await self.store.load_state()
+            self.state.generation = int(saved.get("generation", 0))
+            self.state.tested_total = int(saved.get("tested_total", 0))
+            self.state.promoted_total = int(saved.get("promoted_total", 0))
             self._results = await self.store.load_results(limit=250)
-            seen = await self.store.load_signatures()
 
-            source = await self._load_source_data()
-            configured_candidates = [
-                ForexCandidate(
-                    candidate.strategy,
-                    {**candidate.params, "risk_eur": self.settings.forex_risk_eur},
-                )
-                for candidate in candidate_grid()
-            ]
-            all_candidates = [
-                candidate for candidate in configured_candidates
-                if evaluation_signature(candidate, source) not in seen
-            ]
-            batch_size = max(1, self.settings.forex_lab_batch_size)
-            batch = all_candidates[:batch_size]
+            source: Dict[str, List[dict]] = {}
+            while self.state.running:
+                if not source:
+                    try:
+                        source = await self._load_source_data()
+                        self.state.last_error = None
+                    except Exception as exc:
+                        self.state.stage = "waiting_data"
+                        self.state.last_error = str(exc)
+                        self.state.message = f"Data tijdelijk niet beschikbaar: {exc}. Nieuwe poging over 5 min."
+                        log.warning("Forex data unavailable; retrying later: %s", exc)
+                        await asyncio.sleep(300)
+                        self._bars_1m = {}
+                        continue
 
-            if not batch:
-                self.state.stage = "search_exhausted"
-                self.state.message = "All configured forex candidates have been tested."
-                return
+                seen = await self.store.load_signatures()
+                configured_candidates = [
+                    ForexCandidate(
+                        candidate.strategy,
+                        {**candidate.params, "risk_eur": self.settings.forex_risk_eur},
+                    )
+                    for candidate in candidate_grid()
+                ]
+                remaining = [
+                    candidate for candidate in configured_candidates
+                    if evaluation_signature(candidate, source) not in seen
+                ]
 
-            self.state.generation += 1
-            self.state.stage = "testing"
-            self.state.total = len(batch)
-            self.state.progress = 0
+                if not remaining:
+                    self.state.stage = "waiting_new_data"
+                    self.state.progress = 0
+                    self.state.total = 0
+                    self.state.message = (
+                        "Alle kandidaten op deze dataset zijn getest. "
+                        "Forex Lab blijft actief en controleert over 15 min op nieuwe marktdata."
+                    )
+                    await asyncio.sleep(900)
+                    self._bars_1m = {}
+                    source = {}
+                    continue
 
-            for idx, candidate in enumerate(batch, start=1):
-                if not self.state.running:
-                    break
-                tf = int(candidate.params.get("timeframe_min", 1))
-                bars = {
-                    pair: aggregate_bars(pair_bars, tf)
-                    for pair, pair_bars in source.items()
-                }
-                self.state.current_candidate = candidate.strategy
-                self.state.current_params = dict(candidate.params)
-                self.state.message = (
-                    f"Testing {idx}/{len(batch)} · {candidate.strategy} · "
-                    f"{tf}m · target {candidate.params.get('target_r')}R"
-                )
+                batch_size = max(1, self.settings.forex_lab_batch_size)
+                batch = remaining[:batch_size]
+                self.state.generation += 1
+                self.state.stage = "testing"
+                self.state.total = len(batch)
+                self.state.progress = 0
 
-                result = await asyncio.to_thread(
-                    evaluate_candidate,
-                    candidate,
-                    bars,
-                    cost_bps=self.settings.forex_cost_bps,
-                    stress_multiplier=self.settings.forex_stress_cost_multiplier,
-                    min_oos_trades=self.settings.forex_min_oos_trades,
-                    min_profit_factor=self.settings.forex_min_profit_factor,
-                    min_payoff_ratio=self.settings.forex_min_payoff_ratio,
-                    start_capital=self.settings.forex_start_capital,
-                )
-                signature = evaluation_signature(candidate, source)
-                result["dataset"]["version"] = dataset_version(source)
-                result["dataset"]["source"] = self.settings.forex_data_provider
-                run_id = await self.store.save_run(signature, result)
-                if run_id:
-                    result["run_id"] = run_id
+                for idx, candidate in enumerate(batch, start=1):
+                    if not self.state.running:
+                        break
+                    tf = int(candidate.params.get("timeframe_min", 1))
+                    bars = {
+                        pair: aggregate_bars(pair_bars, tf)
+                        for pair, pair_bars in source.items()
+                    }
+                    self.state.current_candidate = candidate.strategy
+                    self.state.current_params = dict(candidate.params)
+                    self.state.message = (
+                        f"Testing {idx}/{len(batch)} · {candidate.strategy} · "
+                        f"{tf}m · target {candidate.params.get('target_r')}R"
+                    )
 
-                self.state.tested_total += 1
-                if result.get("promoted"):
-                    self.state.promoted_total += 1
-                self.state.progress = idx
-                self.state.last_completed_candidate = candidate.strategy
-                self.state.last_completed_at = datetime.now(timezone.utc).isoformat()
-                self._results.append(result)
-                self._results.sort(
-                    key=lambda row: (
-                        bool(row.get("promoted")),
-                        float(row.get("funnel_score") or 0),
-                        float((row.get("oos") or {}).get("expectancy_r") or 0),
-                    ),
-                    reverse=True,
-                )
-                self._results = self._results[:250]
-                await self.store.save_state(
-                    self.state.generation,
-                    self.state.tested_total,
-                    self.state.promoted_total,
-                )
+                    result = await asyncio.to_thread(
+                        evaluate_candidate,
+                        candidate,
+                        bars,
+                        cost_bps=self.settings.forex_cost_bps,
+                        stress_multiplier=self.settings.forex_stress_cost_multiplier,
+                        min_oos_trades=self.settings.forex_min_oos_trades,
+                        min_profit_factor=self.settings.forex_min_profit_factor,
+                        min_payoff_ratio=self.settings.forex_min_payoff_ratio,
+                        start_capital=self.settings.forex_start_capital,
+                    )
+                    signature = evaluation_signature(candidate, source)
+                    result["dataset"]["version"] = dataset_version(source)
+                    result["dataset"]["source"] = self.settings.forex_data_provider
+                    run_id = await self.store.save_run(signature, result)
+                    if run_id:
+                        result["run_id"] = run_id
 
-                m = result.get("oos") or {}
-                log.info(
-                    "Forex candidate complete: strategy=%s tf=%sm target_r=%s "
-                    "stage=%s score=%s trades=%s trades_day=%s win=%s pf=%s "
-                    "payoff=%s exp_r=%s avg_win_r=%s avg_loss_r=%s best_r=%s worst_r=%s",
-                    candidate.strategy,
-                    tf,
-                    candidate.params.get("target_r"),
-                    result.get("funnel_stage"),
-                    result.get("funnel_score"),
-                    m.get("trades"),
-                    m.get("avg_trades_per_day"),
-                    m.get("win_rate_pct"),
-                    m.get("profit_factor"),
-                    m.get("payoff_ratio"),
-                    m.get("expectancy_r"),
-                    m.get("avg_win_r"),
-                    m.get("avg_loss_r"),
-                    m.get("best_trade_r"),
-                    m.get("worst_trade_r"),
-                )
-                await asyncio.sleep(0.05)
+                    self.state.tested_total += 1
+                    if result.get("promoted"):
+                        self.state.promoted_total += 1
+                    self.state.progress = idx
+                    self.state.last_completed_candidate = candidate.strategy
+                    self.state.last_completed_at = datetime.now(timezone.utc).isoformat()
+                    self._results.append(result)
+                    self._results.sort(
+                        key=lambda row: (
+                            bool(row.get("promoted")),
+                            float(row.get("funnel_score") or 0),
+                            float((row.get("oos") or {}).get("expectancy_r") or 0),
+                        ),
+                        reverse=True,
+                    )
+                    self._results = self._results[:250]
+                    await self.store.save_state(
+                        self.state.generation,
+                        self.state.tested_total,
+                        self.state.promoted_total,
+                    )
+                    await asyncio.sleep(0.05)
 
-            self.state.stage = "batch_complete"
-            self.state.message = (
-                f"Forex batch complete: {self.state.progress}/{self.state.total} tested. "
-                "Every result is stored append-only per strategy."
-            )
+                if self.state.running:
+                    self.state.stage = "continuing"
+                    self.state.message = (
+                        f"Batch afgerond. {self.state.tested_total} totaal getest; "
+                        "automatisch door met de volgende batch."
+                    )
+                    await asyncio.sleep(1)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
