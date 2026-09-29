@@ -4,8 +4,7 @@ on:
   pull_request:
     branches: [ main ]
   push:
-    branches:
-      - forex-first-20260929
+    branches: [ main, forex-first-20260929 ]
 
 jobs:
   test:
