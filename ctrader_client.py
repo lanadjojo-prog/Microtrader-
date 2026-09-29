@@ -246,6 +246,51 @@ class CTraderClient:
             self.last_error = str(exc)
             self.connected = False
 
+    async def trader(self) -> dict:
+        """Return read-only trader/account metadata for diagnostics and calibration."""
+        if not self.account_authenticated or not self.account_id:
+            await self.connect_and_authenticate()
+        await self._send(2121, {"ctidTraderAccountId": self.account_id})
+        message = await self._recv_until(2122)
+        trader = dict((message.get("payload") or {}).get("trader") or {})
+        money_digits = int(trader.get("moneyDigits") or 2)
+        balance_raw = trader.get("balance")
+        if balance_raw is not None:
+            trader["balanceDisplay"] = float(balance_raw) / (10 ** money_digits)
+        leverage_cents = trader.get("leverageInCents")
+        if leverage_cents is not None:
+            trader["leverageDisplay"] = float(leverage_cents) / 100.0
+        return trader
+
+    async def diagnostics(self, pairs: list[str]) -> dict:
+        """Read-only broker diagnostics. Never sends order-related payloads."""
+        self._assert_environment_safe()
+        if not self.account_authenticated or not self.account_id:
+            await self.connect_and_authenticate()
+        trader = await self.trader()
+        pair_details = {}
+        for pair in pairs:
+            try:
+                symbol = await self.resolve_symbol(pair)
+                pair_details[pair] = {
+                    key: symbol.get(key)
+                    for key in (
+                        "symbolId", "symbolName", "digits", "pipPosition",
+                        "minVolume", "maxVolume", "stepVolume",
+                        "lotSize", "commission", "commissionType",
+                        "minCommission", "minCommissionType",
+                        "tradingMode", "enableShortSelling",
+                    )
+                    if key in symbol
+                }
+            except Exception as exc:
+                pair_details[pair] = {"error": str(exc)}
+        return {
+            "connection": self.public_state(),
+            "trader": trader,
+            "symbols": pair_details,
+        }
+
     async def symbols(self) -> list[dict]:
         if not self.account_authenticated or not self.account_id:
             await self.connect_and_authenticate()
