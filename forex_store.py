@@ -44,6 +44,7 @@ class ForexStrategyStore:
                     oos JSONB NOT NULL DEFAULT '{}'::jsonb,
                     stress_oos JSONB NOT NULL DEFAULT '{}'::jsonb,
                     per_pair JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    robustness JSONB NOT NULL DEFAULT '{}'::jsonb,
                     funnel_score DOUBLE PRECISION,
                     promoted BOOLEAN NOT NULL DEFAULT FALSE,
                     rejection_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -88,12 +89,12 @@ class ForexStrategyStore:
                 INSERT INTO microtrader_forex_strategy_runs (
                     run_id, signature, strategy, family, phase, status,
                     params, pairs, timeframe_min, dataset, risk_model,
-                    train, oos, stress_oos, per_pair, funnel_score,
+                    train, oos, stress_oos, per_pair, robustness, funnel_score,
                     promoted, rejection_reasons, tested_at
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s,
                     %s::jsonb, %s::jsonb, %s, %s::jsonb, %s::jsonb,
-                    %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                    %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s,
                     %s, %s::jsonb, NOW()
                 )
                 """,
@@ -113,6 +114,7 @@ class ForexStrategyStore:
                     json.dumps(result.get("oos", {})),
                     json.dumps(result.get("stress_oos", {})),
                     json.dumps(result.get("per_pair", {})),
+                    json.dumps(result.get("robustness", {})),
                     result.get("funnel_score"),
                     bool(result.get("promoted", False)),
                     json.dumps(result.get("rejection_reasons", [])),
@@ -162,7 +164,7 @@ class ForexStrategyStore:
                 """
                 SELECT run_id, signature, strategy, family, phase, status,
                        params, pairs, timeframe_min, dataset, risk_model,
-                       train, oos, stress_oos, per_pair, funnel_score,
+                       train, oos, stress_oos, per_pair, robustness, funnel_score,
                        promoted, rejection_reasons, tested_at
                 FROM microtrader_forex_strategy_runs
                 ORDER BY promoted DESC,
