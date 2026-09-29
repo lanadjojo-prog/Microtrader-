@@ -56,11 +56,11 @@ class ForexStrategyLab:
         self,
         settings: Settings,
         client: CTraderClient,
-        external_data: ExternalForexData,
+        external_data: Optional[ExternalForexData] = None,
     ):
         self.settings = settings
         self.client = client
-        self.external_data = external_data
+        self.external_data = external_data or ExternalForexData(settings)
         self.store = ForexStrategyStore(settings.database_url)
         self.state = ForexLabState(pairs_total=len(settings.forex_pairs))
         self._task: Optional[asyncio.Task] = None
