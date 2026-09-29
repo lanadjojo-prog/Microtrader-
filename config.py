@@ -98,6 +98,20 @@ class Settings:
     ctrader_refresh_token: str = os.getenv("CTRADER_REFRESH_TOKEN", "")
     ctrader_account_id: str = os.getenv("CTRADER_ACCOUNT_ID", "")
 
+    # Precision Lab: separate tight-stop tester using bid/ask tick execution.
+    precision_lab_auto_start: bool = _bool("PRECISION_LAB_AUTO_START", False)
+    precision_pairs_raw: str = os.getenv("PRECISION_PAIRS", "EUR/USD")
+    precision_lookback_days: int = _int("PRECISION_LOOKBACK_DAYS", 7)
+    precision_max_bars_per_pair: int = _int("PRECISION_MAX_BARS_PER_PAIR", 12000)
+    precision_max_ticks_per_side: int = _int("PRECISION_MAX_TICKS_PER_SIDE", 250000)
+    precision_batch_size: int = _int("PRECISION_BATCH_SIZE", 12)
+    precision_start_capital: float = _float("PRECISION_START_CAPITAL_EUR", 50.0)
+    precision_risk_eur: float = _float("PRECISION_RISK_EUR", 0.75)
+    precision_commission_pips: float = _float("PRECISION_COMMISSION_PIPS", 0.50)
+    precision_stress_multiplier: float = _float("PRECISION_STRESS_MULTIPLIER", 2.0)
+    precision_min_oos_trades: int = _int("PRECISION_MIN_OOS_TRADES", 40)
+    precision_min_profit_factor: float = _float("PRECISION_MIN_PROFIT_FACTOR", 1.20)
+
     # Crypto / microstructure lab (public Bitvavo data, simulation-only)
     crypto_lab_auto_start: bool = _bool("CRYPTO_LAB_AUTO_START", False)
     crypto_lab_symbols_raw: str = os.getenv("CRYPTO_LAB_SYMBOLS", "BTC-EUR,ETH-EUR,SOL-EUR,BTC-USDC,ETH-USDC,SOL-USDC")
@@ -135,6 +149,10 @@ class Settings:
             and self.ctrader_client_secret
             and self.ctrader_access_token
         )
+
+    @property
+    def precision_pairs(self) -> List[str]:
+        return [s.strip().upper() for s in self.precision_pairs_raw.split(",") if s.strip()]
 
     @property
     def crypto_lab_symbols(self) -> List[str]:
