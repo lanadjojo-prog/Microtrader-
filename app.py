@@ -92,6 +92,7 @@ async def status(authorization: str | None = Header(default=None)):
     require_token(authorization)
     payload = engine.public_state()
     payload.update({
+        "mode": "forex-first" if settings.forex_first else "legacy-mixed",
         "paper": settings.paper,
         "live_trading_enabled": settings.live_trading_enabled,
         "can_trade": settings.can_trade,
@@ -138,6 +139,8 @@ async def lab_results(authorization: str | None = Header(default=None)):
 @app.post("/api/lab/start")
 async def lab_start(authorization: str | None = Header(default=None)):
     require_token(authorization)
+    if settings.forex_first:
+        raise HTTPException(status_code=409, detail="Stock Strategy Lab is disabled in FOREX_FIRST mode")
     if not settings.api_key or not settings.api_secret:
         raise HTTPException(status_code=503, detail="Alpaca API credentials are not configured")
     await lab.start()
@@ -166,6 +169,8 @@ async def research_status(authorization: str | None = Header(default=None)):
 @app.post("/api/research/start")
 async def research_start(authorization: str | None = Header(default=None)):
     require_token(authorization)
+    if settings.forex_first:
+        raise HTTPException(status_code=409, detail="Legacy stock Research Labs are disabled in FOREX_FIRST mode")
     if not settings.api_key or not settings.api_secret:
         raise HTTPException(status_code=503, detail="Alpaca API credentials are not configured")
     await research.start()
@@ -188,6 +193,8 @@ async def agent_status(authorization: str | None = Header(default=None)):
 @app.post("/api/agent/start")
 async def agent_start(authorization: str | None = Header(default=None)):
     require_token(authorization)
+    if settings.forex_first:
+        raise HTTPException(status_code=409, detail="Legacy stock Research Agent is disabled in FOREX_FIRST mode")
     await research_agent.start()
     return {"ok": True, "running": True}
 
@@ -202,6 +209,8 @@ async def agent_stop(authorization: str | None = Header(default=None)):
 @app.post("/api/agent/cycle")
 async def agent_cycle(authorization: str | None = Header(default=None)):
     require_token(authorization)
+    if settings.forex_first:
+        raise HTTPException(status_code=409, detail="Legacy stock Research Agent is disabled in FOREX_FIRST mode")
     await research_agent.cycle()
     return research_agent.public_state()
 
@@ -215,6 +224,8 @@ async def crypto_lab_status(authorization: str | None = Header(default=None)):
 @app.post("/api/crypto-lab/start")
 async def crypto_lab_start(authorization: str | None = Header(default=None)):
     require_token(authorization)
+    if settings.forex_first:
+        raise HTTPException(status_code=409, detail="Crypto Lab is disabled in FOREX_FIRST mode")
     await crypto_lab.start()
     return {"ok": True, "running": True}
 
@@ -229,6 +240,8 @@ async def crypto_lab_stop(authorization: str | None = Header(default=None)):
 @app.post("/api/start")
 async def start(authorization: str | None = Header(default=None)):
     require_token(authorization)
+    if settings.forex_first:
+        raise HTTPException(status_code=409, detail="Alpaca trading engine is disabled in FOREX_FIRST mode")
     await engine.start()
     return {"ok": True, "running": True}
 
@@ -344,7 +357,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 </head>
 <body>
 <h1>MicroTrader</h1><p class="muted">Trading + research dashboard · safe-by-default</p>
-<div class="nav"><a href="#engine">Trading Engine</a><a href="#agent">Research Agent</a><a href="#stock-lab">Stock Lab</a><a href="#crypto-lab">Crypto Lab</a><a href="#research-labs">Research Labs</a></div>
+<div class="nav"><a href="#engine">Trading Engine</a><a href="#forex-lab">Forex Lab</a><a href="#agent">Research Agent</a><a href="#stock-lab">Stock Lab</a><a href="#crypto-lab">Crypto Lab</a><a href="#research-labs">Research Labs</a></div>
 <div class="card">
   <div class="row"><input id="token" type="password" placeholder="Dashboard token" style="min-width:260px"><button onclick="loadStatus()">Connect</button><button onclick="action('start')">Start</button><button onclick="action('stop')">Stop</button><button class="danger" onclick="action('flatten')">Flatten</button></div>
 </div>
@@ -356,6 +369,15 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0e1116;color:#e9
 <div class="card"><div id="headline" class="row"></div><div id="metrics" class="grid" style="margin-top:12px"></div></div>
 <div class="card"><h3>Positions</h3><pre id="positions">Not connected.</pre></div>
 <div class="card"><h3>Recent executions</h3><pre id="executions">Not connected.</pre></div>
+<div class="card" id="forex-lab">
+  <div class="section-title"><h3>Forex Strategy Lab</h3><span class="pill good">FUSION / cTRADER · DEMO FIRST</span></div>
+  <div class="mode-banner"><b>Asymmetry-first.</b> Elke strategie-run wordt append-only opgeslagen met parameters, dataset, OOS/stress-resultaten, per-pair resultaten, risk model en uitgebreide trade-statistieken.</div>
+  <div class="row"><button onclick="forexAction('start')">Run Forex Lab</button><button onclick="forexAction('stop')">Stop Forex Lab</button><button onclick="loadForex()">Refresh</button><button onclick="openCTraderAuth()">Authorize cTrader</button></div>
+  <div id="forexStatus" class="row" style="margin-top:14px"><span class="pill">IDLE</span></div>
+  <div id="forexMessage" class="muted" style="margin-top:8px">Waiting for configuration.</div>
+  <div id="forexMetrics" class="grid" style="margin-top:12px"></div>
+  <div id="forexResults" class="scroll"></div>
+</div>
 <div class="card" id="agent">
   <div class="section-title"><h3>Research Agent</h3><span class="pill good">RESEARCH ONLY</span></div>
   <div class="mode-banner"><b>Autonoom, begrensd.</b> De agent mag research prioriteren en vervolgexperimenten sturen, maar kan geen orders plaatsen of live trading inschakelen.</div>
@@ -543,6 +565,52 @@ async function labAction(x){
   document.getElementById('labMessage').textContent=msg;
  }
 }
+async function loadForex(){
+ try{
+  const [s,r]=await Promise.all([api('forex-lab/status'),api('forex-lab/results')]);
+  const broker=s.broker||{};
+  const cls=s.running?'run':(s.last_error?'bad':(broker.account_authenticated?'good':''));
+  const label=s.running?'RUNNING':(s.last_error?'ERROR':(broker.account_authenticated?'READY':'WAITING'));
+  document.getElementById('forexStatus').innerHTML=
+    '<span class="pill '+cls+'">'+label+'</span>'+
+    '<span class="pill">'+esc(s.stage||'idle')+'</span>'+
+    '<span class="pill">'+esc(broker.environment||'demo').toUpperCase()+'</span>';
+  document.getElementById('forexMessage').textContent=s.message||'';
+  const vals={
+    'Pairs':(s.pairs||[]).join(', ')||'-',
+    'Tested':s.tested_total||0,
+    'Start capital':'€'+fmt(s.start_capital_eur,2),
+    'Risk / trade':'€'+fmt(s.risk_eur,2),
+    'cTrader':broker.account_authenticated?'AUTHENTICATED':(broker.access_token_configured?'TOKEN READY':'NEEDS CREDENTIALS'),
+    'Progress':(s.progress||0)+'/'+(s.total||0)
+  };
+  document.getElementById('forexMetrics').innerHTML=Object.entries(vals).map(([k,v])=>'<div class="metric"><span class="muted">'+esc(k)+'</span><b>'+esc(v)+'</b></div>').join('');
+  const rows=(r.results||[]).slice(0,30);
+  if(!rows.length){
+    document.getElementById('forexResults').innerHTML='<p class="muted">Nog geen forex strategie-resultaten.</p>';
+    return;
+  }
+  const head='<table class="lab-table"><thead><tr><th>#</th><th>Strategy</th><th>TF</th><th>Target</th><th>Stage</th><th>Trades</th><th>/day</th><th>Win%</th><th>Avg win</th><th>Avg loss</th><th>Payoff</th><th>PF</th><th>Exp R</th><th>Best/Worst</th><th>Loss streak</th></tr></thead><tbody>';
+  const body=rows.map((x,i)=>{
+    const m=x.oos||{},p=x.params||{};
+    return '<tr><td>'+(i+1)+'</td><td>'+esc(prettyLabName(x.strategy))+'</td><td>'+esc(x.timeframe_min||p.timeframe_min||'-')+'m</td><td>'+fmt(p.target_r,1)+'R</td><td>'+esc(prettyLabName(x.status||x.funnel_stage||''))+'</td><td>'+(m.trades||0)+'</td><td>'+fmt(m.avg_trades_per_day,2)+'</td><td>'+fmt(m.win_rate_pct,1)+'%</td><td>'+fmt(m.avg_win_r,2)+'R</td><td>'+fmt(m.avg_loss_r,2)+'R</td><td>'+fmt(m.payoff_ratio,2)+'x</td><td>'+fmt(m.profit_factor,2)+'</td><td>'+fmt(m.expectancy_r,3)+'R</td><td>'+fmt(m.best_trade_r,2)+' / '+fmt(m.worst_trade_r,2)+'R</td><td>'+(m.max_consecutive_losses||0)+'</td></tr>';
+  }).join('');
+  document.getElementById('forexResults').innerHTML=head+body+'</tbody></table>';
+ }catch(e){
+  document.getElementById('forexMessage').textContent=e.message==='Unauthorized'?'Dashboard token ontbreekt of is ongeldig.':e.message;
+ }
+}
+async function forexAction(x){
+ try{await api('forex-lab/'+x,'POST');await loadForex()}
+ catch(e){document.getElementById('forexMessage').textContent=e.message}
+}
+async function openCTraderAuth(){
+ try{
+  const x=await api('ctrader/oauth-url');
+  window.open(x.url,'_blank','noopener');
+ }catch(e){document.getElementById('forexMessage').textContent=e.message}
+}
+
 async function loadAgent(){
  try{
   const s=await api('agent/status');
@@ -704,7 +772,7 @@ async function researchAction(x){try{await api('research/'+x,'POST');await loadR
 const savedToken=sessionStorage.getItem('microtraderDashboardToken')||'';
 document.getElementById('token').value=savedToken;
 document.getElementById('token').addEventListener('input',e=>sessionStorage.setItem('microtraderDashboardToken',e.target.value));
-setInterval(()=>{if(token()){loadStatus();loadAgent();loadLab();loadCrypto();loadResearch();loadCoordinator()}},5000);
-if(token()){loadStatus();loadAgent();loadLab();loadCrypto();loadResearch();loadCoordinator();}
+setInterval(()=>{if(token()){loadStatus();loadForex();loadAgent();loadLab();loadCrypto();loadResearch();loadCoordinator()}},5000);
+if(token()){loadStatus();loadForex();loadAgent();loadLab();loadCrypto();loadResearch();loadCoordinator();}
 </script>
 </body></html>'''
