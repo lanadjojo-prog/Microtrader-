@@ -75,6 +75,11 @@ class CTraderClient:
     def api_ready(self) -> bool:
         return bool(self.oauth_ready and self.active_access_token)
 
+    def set_runtime_tokens(self, access_token: str, refresh_token: str = "") -> None:
+        self._runtime_access_token = str(access_token or "")
+        self._runtime_refresh_token = str(refresh_token or "")
+
+
     def public_state(self) -> dict:
         return {
             "environment": self.settings.ctrader_environment,
