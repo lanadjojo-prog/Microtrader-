@@ -41,8 +41,17 @@ class CTraderClient:
         self._runtime_access_token: str = ""
         self._runtime_refresh_token: str = ""
 
+    def _assert_environment_safe(self) -> None:
+        if self.settings.ctrader_environment not in {"demo", "live"}:
+            raise CTraderError("CTRADER_ENVIRONMENT must be 'demo' or 'live'")
+        if self.settings.ctrader_demo_only and self.settings.ctrader_environment != "demo":
+            raise CTraderError(
+                "cTrader live environment is blocked: CTRADER_DEMO_ONLY=true"
+            )
+
     @property
     def endpoint(self) -> str:
+        self._assert_environment_safe()
         host = "demo.ctraderapi.com" if self.settings.ctrader_environment == "demo" else "live.ctraderapi.com"
         return f"wss://{host}:5036"
 
@@ -69,6 +78,8 @@ class CTraderClient:
     def public_state(self) -> dict:
         return {
             "environment": self.settings.ctrader_environment,
+            "demo_only": self.settings.ctrader_demo_only,
+            "oauth_scope": self.settings.ctrader_oauth_scope,
             "endpoint": self.endpoint,
             "oauth_ready": self.oauth_ready,
             "access_token_configured": bool(self.active_access_token),
@@ -82,11 +93,17 @@ class CTraderClient:
             "last_error": self.last_error,
         }
 
-    def authorization_url(self, scope: str = "trading") -> str:
+    def authorization_url(self, scope: Optional[str] = None) -> str:
+        self._assert_environment_safe()
         if not self.settings.ctrader_client_id or not self.settings.ctrader_redirect_uri:
             raise CTraderError("CTRADER_CLIENT_ID and CTRADER_REDIRECT_URI are required")
+        scope = (scope or self.settings.ctrader_oauth_scope or "accounts").strip().lower()
         if scope not in {"accounts", "trading"}:
             raise CTraderError("scope must be 'accounts' or 'trading'")
+        if self.settings.ctrader_demo_only and scope != "accounts":
+            raise CTraderError(
+                "Trading OAuth scope is blocked while CTRADER_DEMO_ONLY=true"
+            )
         return self.AUTH_BASE + "?" + urlencode({
             "client_id": self.settings.ctrader_client_id,
             "redirect_uri": self.settings.ctrader_redirect_uri,
@@ -160,6 +177,7 @@ class CTraderClient:
                 return message
 
     async def connect_and_authenticate(self, access_token: Optional[str] = None) -> dict:
+        self._assert_environment_safe()
         token = access_token or self.active_access_token
         if not self.oauth_ready or not token:
             raise CTraderError("cTrader client credentials and access token are required")
