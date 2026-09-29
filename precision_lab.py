@@ -143,59 +143,126 @@ class PrecisionStrategyLab:
             self.state.tested_total = int(saved.get("tested_total", 0))
             self.state.deep_search_total = int(saved.get("deep_search_total", 0))
             self._results = await self.store.load_results(limit=250)
-            seen = await self.store.load_signatures()
-            bars, ticks = await self._load_data()
-            version = dataset_version(bars, ticks)
 
-            configured: List[PrecisionCandidate] = []
-            # Expand the existing mechanical signal families across the agreed
-            # 2-5 pip stop, 4-10 pip target and EUR 2/3 fixed-risk grid.
-            templates = candidate_grid()
-            by_strategy = {}
-            for c in templates:
-                by_strategy.setdefault(c.strategy, c)
-            for base in by_strategy.values():
-                for stop in (2.0, 3.0, 4.0, 5.0):
-                    for target in (4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0):
-                        for risk in (2.0, 3.0):
-                            configured.append(PrecisionCandidate(base.strategy, {**base.params, "stop_pips": stop, "target_pips": target, "risk_eur": risk, "_phase": "precision_economics"}))
+            bars: Dict[str, List[dict]] = {}
+            ticks: Dict[str, List[QuoteTick]] = {}
+            while self.state.running:
+                if not bars or not ticks:
+                    try:
+                        bars, ticks = await self._load_data()
+                        self.state.last_error = None
+                    except Exception as exc:
+                        self.state.stage = "waiting_data"
+                        self.state.last_error = str(exc)
+                        self.state.message = f"Tickdata tijdelijk niet beschikbaar: {exc}. Nieuwe poging over 5 min."
+                        log.warning("Precision data unavailable; retrying later: %s", exc)
+                        await asyncio.sleep(300)
+                        self._bars, self._ticks = {}, {}
+                        bars, ticks = {}, {}
+                        continue
 
-            remaining = [c for c in configured if evaluation_signature(c, version) not in seen]
-            if not remaining:
-                self.state.stage = "search_exhausted"
-                self.state.message = "All configured precision candidates have been tested on this dataset version."
-                return
+                version = dataset_version(bars, ticks)
+                seen = await self.store.load_signatures()
+                configured: List[PrecisionCandidate] = []
+                templates = candidate_grid()
+                by_strategy = {}
+                for c in templates:
+                    by_strategy.setdefault(c.strategy, c)
+                for base in by_strategy.values():
+                    for stop in (2.0, 3.0, 4.0, 5.0):
+                        for target in (4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0):
+                            for risk in (2.0, 3.0):
+                                configured.append(
+                                    PrecisionCandidate(
+                                        base.strategy,
+                                        {
+                                            **base.params,
+                                            "stop_pips": stop,
+                                            "target_pips": target,
+                                            "risk_eur": risk,
+                                            "_phase": "precision_economics",
+                                        },
+                                    )
+                                )
 
-            self.state.generation += 1
-            self.state.stage = "testing"
-            self.state.total = len(remaining)
-            for idx, candidate in enumerate(remaining, 1):
-                if not self.state.running:
-                    break
-                self.state.progress = idx
-                self.state.current_candidate = candidate.strategy
-                self.state.current_params = dict(candidate.params)
-                self.state.message = f"Precision {idx}/{len(remaining)} · {candidate.strategy} · {candidate.params['stop_pips']}p/{candidate.params['target_pips']}p · EUR {candidate.params['risk_eur']} risk"
-                result = await asyncio.to_thread(evaluate_candidate, candidate, bars, ticks, commission_pips_roundtrip=self.settings.precision_commission_pips, stress_multiplier=self.settings.precision_stress_multiplier, min_oos_trades=self.settings.precision_min_oos_trades, min_profit_factor=self.settings.precision_min_profit_factor, start_capital=self.settings.precision_start_capital)
-                result["dataset"]["version"] = version
-                result["dataset"]["source"] = self.settings.precision_data_provider
-                signature = evaluation_signature(candidate, version)
-                run_id = await self.store.save_run(signature, result)
-                clean = {k: v for k, v in result.items() if not k.startswith("_")}
-                if run_id:
-                    clean["run_id"] = run_id
-                self.state.tested_total += 1
-                if clean.get("funnel_stage") == "precision_deep_search":
-                    self.state.deep_search_total += 1
-                self.state.last_completed_candidate = candidate.strategy
-                self.state.last_completed_at = datetime.now(timezone.utc).isoformat()
-                self._results.append(clean)
-                self._results.sort(key=lambda r: (float(r.get("funnel_score") or 0), float((r.get("oos") or {}).get("expectancy_r") or 0)), reverse=True)
-                self._results = self._results[:250]
-                await self.store.save_state(self.state.generation, self.state.tested_total, self.state.deep_search_total)
-                await asyncio.sleep(0.05)
-            self.state.stage = "complete"
-            self.state.message = "Precision research grid complete; checkpoints saved after every candidate."
+                remaining = [
+                    c for c in configured
+                    if evaluation_signature(c, version) not in seen
+                ]
+                if not remaining:
+                    self.state.stage = "waiting_new_data"
+                    self.state.progress = 0
+                    self.state.total = 0
+                    self.state.message = (
+                        "Volledige pip-grid op deze dataset getest. "
+                        "Precision Lab blijft actief en controleert over 15 min op nieuwe tickdata."
+                    )
+                    await asyncio.sleep(900)
+                    self._bars, self._ticks = {}, {}
+                    bars, ticks = {}, {}
+                    continue
+
+                self.state.generation += 1
+                self.state.stage = "testing"
+                self.state.total = len(remaining)
+                self.state.progress = 0
+                for idx, candidate in enumerate(remaining, 1):
+                    if not self.state.running:
+                        break
+                    self.state.progress = idx
+                    self.state.current_candidate = candidate.strategy
+                    self.state.current_params = dict(candidate.params)
+                    self.state.message = (
+                        f"Precision {idx}/{len(remaining)} · {candidate.strategy} · "
+                        f"{candidate.params['stop_pips']}p/{candidate.params['target_pips']}p · "
+                        f"EUR {candidate.params['risk_eur']} risk"
+                    )
+                    result = await asyncio.to_thread(
+                        evaluate_candidate,
+                        candidate,
+                        bars,
+                        ticks,
+                        commission_pips_roundtrip=self.settings.precision_commission_pips,
+                        stress_multiplier=self.settings.precision_stress_multiplier,
+                        min_oos_trades=self.settings.precision_min_oos_trades,
+                        min_profit_factor=self.settings.precision_min_profit_factor,
+                        start_capital=self.settings.precision_start_capital,
+                    )
+                    result["dataset"]["version"] = version
+                    result["dataset"]["source"] = self.settings.precision_data_provider
+                    signature = evaluation_signature(candidate, version)
+                    run_id = await self.store.save_run(signature, result)
+                    clean = {k: v for k, v in result.items() if not k.startswith("_")}
+                    if run_id:
+                        clean["run_id"] = run_id
+                    self.state.tested_total += 1
+                    if clean.get("funnel_stage") == "precision_deep_search":
+                        self.state.deep_search_total += 1
+                    self.state.last_completed_candidate = candidate.strategy
+                    self.state.last_completed_at = datetime.now(timezone.utc).isoformat()
+                    self._results.append(clean)
+                    self._results.sort(
+                        key=lambda r: (
+                            float(r.get("funnel_score") or 0),
+                            float((r.get("oos") or {}).get("expectancy_r") or 0),
+                        ),
+                        reverse=True,
+                    )
+                    self._results = self._results[:250]
+                    await self.store.save_state(
+                        self.state.generation,
+                        self.state.tested_total,
+                        self.state.deep_search_total,
+                    )
+                    await asyncio.sleep(0.05)
+
+                if self.state.running:
+                    self.state.stage = "continuing"
+                    self.state.message = (
+                        f"Pip-grid afgerond. {self.state.tested_total} totaal getest; "
+                        "worker blijft actief voor nieuwe marktdata."
+                    )
+                    await asyncio.sleep(1)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
