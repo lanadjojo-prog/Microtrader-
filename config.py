@@ -24,7 +24,10 @@ class Settings:
     auto_start: bool = _bool("AUTO_START", False)
     dashboard_token: str = os.getenv("DASHBOARD_TOKEN", "")
     database_url: str = os.getenv("DATABASE_URL", "")
-    strategy_min_trades_per_day: float = _float("STRATEGY_MIN_TRADES_PER_DAY", 10.0)
+    strategy_min_trades_per_day: float = _float("STRATEGY_MIN_TRADES_PER_DAY", 3.0)
+    strategy_preferred_trades_per_day: float = _float("STRATEGY_PREFERRED_TRADES_PER_DAY", 5.0)
+    strategy_target_trades_per_day: float = _float("STRATEGY_TARGET_TRADES_PER_DAY", 10.0)
+    portfolio_min_trades_per_day: float = _float("PORTFOLIO_MIN_TRADES_PER_DAY", 10.0)
     strategy_min_volume_ratio: float = _float("STRATEGY_MIN_VOLUME_RATIO", 0.70)
     strategy_volume_window: int = _int("STRATEGY_VOLUME_WINDOW", 50)
 
