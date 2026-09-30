@@ -16,6 +16,20 @@ class TradeManagementTests(unittest.TestCase):
         self.assertAlmostEqual(trigger_r, 2.0, places=8)
         self.assertAlmostEqual(lock_r, 0.06, places=8)
 
+    def test_custom_trigger_grid_is_supported(self):
+        trigger_r, lock_r = _exit_management(
+            {
+                "exit_mode": "safe_be_1_5r",
+                "management_trigger_r": 1.5,
+                "management_lock_net_r": 0.05,
+            },
+            entry=1.0,
+            risk_distance=0.01,
+            cost_bps=0.50,
+        )
+        self.assertAlmostEqual(trigger_r, 1.5, places=8)
+        self.assertAlmostEqual(lock_r, 0.06, places=8)
+
     def test_profit_locks_are_net_of_costs(self):
         _, lock_025 = _exit_management(
             {"exit_mode": "protect_2r_025r"},
