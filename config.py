@@ -30,6 +30,8 @@ class Settings:
     portfolio_min_trades_per_day: float = _float("PORTFOLIO_MIN_TRADES_PER_DAY", 10.0)
     strategy_min_volume_ratio: float = _float("STRATEGY_MIN_VOLUME_RATIO", 0.70)
     strategy_volume_window: int = _int("STRATEGY_VOLUME_WINDOW", 50)
+    strategy_max_loss_streak: int = _int("STRATEGY_MAX_LOSS_STREAK", 5)
+    strategy_max_loss_streak_asymmetric: int = _int("STRATEGY_MAX_LOSS_STREAK_ASYMMETRIC", 7)
 
     # Legacy stock settings are retained only for old modules and default to
     # empty in the forex-only runtime.
@@ -133,6 +135,7 @@ class Settings:
     # Forward paper trading for promoted Forex strategies.
     paper_trading_auto_start: bool = _bool("PAPER_TRADING_AUTO_START", True)
     paper_start_balance: float = _float("PAPER_START_BALANCE_EUR", 50.0)
+    paper_risk_eur: float = _float("PAPER_RISK_EUR", 1.50)
     paper_poll_seconds: int = _int("PAPER_POLL_SECONDS", 60)
 
     # Crypto / microstructure lab (public Bitvavo data, simulation-only)
