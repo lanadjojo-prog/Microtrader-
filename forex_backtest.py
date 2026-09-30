@@ -125,17 +125,22 @@ def _exit_management(
     slippage. Therefore a BE stop is not placed at the raw entry price.
     """
     mode = str(params.get("exit_mode") or "baseline")
+    desired_net_r = None
     if mode == "breakeven_2r":
-        risk_pct = risk_distance / entry if entry > 0 else 0.0
-        roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
-        cost_r = roundtrip_cost_pct / risk_pct if risk_pct > 0 else 0.0
-        buffer_r = max(0.0, float(params.get("breakeven_buffer_r", 0.05)))
-        return 2.0, cost_r + buffer_r
-    if mode == "protect_2r_025r":
-        return 2.0, 0.25
-    if mode == "lock_2r_05r":
-        return 2.0, 0.50
-    return None, None
+        desired_net_r = max(0.0, float(params.get("breakeven_buffer_r", 0.05)))
+    elif mode == "protect_2r_025r":
+        desired_net_r = 0.25
+    elif mode == "lock_2r_05r":
+        desired_net_r = 0.50
+    else:
+        return None, None
+
+    risk_pct = risk_distance / entry if entry > 0 else 0.0
+    roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
+    cost_r = roundtrip_cost_pct / risk_pct if risk_pct > 0 else 0.0
+    # lock_r is a GROSS price-distance in R. Adding cost_r means that after
+    # modeled round-trip costs, the intended NET lock remains +0.05/+0.25/+0.50R.
+    return 2.0, cost_r + float(desired_net_r)
 
 
 def _run_asymmetric_exit(
@@ -573,8 +578,9 @@ def evaluate_candidate(
             "stress_cost_multiplier": stress_multiplier,
             "cost_bps_per_side": cost_bps,
             "conservative_same_bar_stop_first": True,
-            "breakeven_cost_adjusted": True,
-            "breakeven_buffer_r": float(candidate.params.get("breakeven_buffer_r", 0.05)),
+            "trade_management_net_of_costs": True,
+            "breakeven_net_lock_r": float(candidate.params.get("breakeven_buffer_r", 0.05)),
+            "profit_lock_modes_net_r": [0.25, 0.50],
             "min_trades_per_day": float(min_trades_per_day),
             "preferred_trades_per_day": float(preferred_trades_per_day),
             "target_trades_per_day": float(target_trades_per_day),
