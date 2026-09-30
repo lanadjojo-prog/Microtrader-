@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 from forex_metrics import strategy_metrics
 from market_filters import entry_allowed
 
-FOREX_EVALUATION_POLICY_VERSION = "forex-funnel-v3-frozen-holdout20"
+FOREX_EVALUATION_POLICY_VERSION = "forex-funnel-v4-holdout20-oos20"
 
 
 @dataclass(frozen=True)
