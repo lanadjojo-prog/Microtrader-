@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 from forex_metrics import strategy_metrics
 from market_filters import entry_allowed
 
+PRECISION_EVALUATION_POLICY_VERSION = "precision-v2-policy-fingerprint"
+
 
 QuoteTick = Tuple[int, float, float]  # timestamp_ms, bid, ask
 
@@ -641,12 +643,14 @@ def evaluate_candidate(
                 float(candidate.params["target_pips"]) /
                 float(candidate.params["stop_pips"]), 3
             ),
+            "broker_constraints_checked": False,
             "note": (
-                "Fixed-risk research model. Broker minimum lot, margin and exact "
-                "cash risk are validated against the Fusion cTrader demo account."
+                "Fixed-risk research model only. Broker minimum volume, margin "
+                "and exact cash risk still require separate demo-account validation."
             ),
         },
         "execution_model": {
+            "evaluation_policy_version": PRECISION_EVALUATION_POLICY_VERSION,
             "pending_orders": True,
             "bid_ask_ticks": True,
             "spread_embedded_in_fills": True,
