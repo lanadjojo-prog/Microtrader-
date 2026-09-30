@@ -99,6 +99,56 @@ class ResearchStore:
             )
             return {str(row[0]) for row in await cur.fetchall()}
 
+    async def load_paper_eligible_validations(
+        self,
+        *,
+        research_policy_version: str,
+        min_trades_per_day: float,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Validated Research candidates that are truly eligible for paper.
+
+        Eligibility requires all of:
+        - 17-stage validation completed;
+        - the exact frozen candidate is promoted in Research;
+        - current Research policy version;
+        - current hard trades/day minimum.
+        """
+        if not self.enabled:
+            return []
+        async with await psycopg.AsyncConnection.connect(
+            self.database_url, row_factory=dict_row
+        ) as conn:
+            cur = await conn.execute(
+                """
+                SELECT DISTINCT ON (v.candidate_signature)
+                       v.candidate_signature,
+                       v.strategy,
+                       v.params,
+                       v.summary,
+                       r.oos,
+                       r.funnel_score,
+                       r.tested_at
+                FROM microtrader_research_validations v
+                JOIN microtrader_forex_research_strategy_results r
+                  ON r.strategy = v.strategy
+                 AND r.params = v.params
+                WHERE v.status = 'completed'
+                  AND r.funnel_stage = 'promoted'
+                  AND r.promoted = TRUE
+                  AND COALESCE(r.params->>'_policy_version', '') = %s
+                  AND COALESCE((r.oos->>'avg_trades_per_day')::double precision, 0) >= %s
+                ORDER BY v.candidate_signature, r.tested_at DESC
+                LIMIT %s
+                """,
+                (
+                    str(research_policy_version),
+                    float(min_trades_per_day),
+                    max(1, int(limit)),
+                ),
+            )
+            return [dict(row) for row in await cur.fetchall()]
+
     async def load_all(self) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
