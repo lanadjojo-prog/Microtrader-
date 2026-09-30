@@ -89,8 +89,44 @@ async def pst(authorization:str|None=Header(None)): auth(authorization); await p
 async def psp(authorization:str|None=Header(None)): auth(authorization); await precision_lab.stop(); return precision_lab.public_state()
 @app.get('/api/paper/status')
 async def paper_status(authorization:str|None=Header(None)): auth(authorization); return paper_engine.public_state()
+async def _paper_results_with_marks():
+    data = await paper_engine.results()
+    positions = list(data.get("positions") or [])
+    cache = {}
+    for row in positions:
+        try:
+            params = dict(row.get("params") or {})
+            tf = int(params.get("timeframe_min") or 1)
+            pair = str(row.get("pair") or "")
+            key = (pair, tf)
+            if key not in cache:
+                bars = await paper_ctrader.historical_bars(
+                    pair, timeframe_min=tf, max_bars=5, lookback_days=1
+                )
+                cache[key] = float(bars[-1]["c"]) if bars else None
+            mark = cache.get(key)
+            if mark is None:
+                continue
+            entry = float(row.get("entry_price") or 0)
+            risk_distance = float(row.get("risk_distance") or 0)
+            direction = int(row.get("direction") or 0)
+            risk_eur = float(row.get("risk_eur") or 0)
+            gross = direction * ((mark / entry) - 1.0) if entry > 0 else 0.0
+            net = gross - (2.0 * float(settings.forex_cost_bps) / 10_000.0)
+            risk_pct = risk_distance / entry if entry > 0 else 0.0
+            open_r = net / risk_pct if risk_pct > 0 else 0.0
+            row["current_price"] = mark
+            row["unrealized_r"] = round(open_r, 4)
+            row["unrealized_pnl"] = round(open_r * risk_eur, 4)
+        except Exception:
+            continue
+    data["positions"] = positions
+    return data
+
 @app.get('/api/paper/results')
-async def paper_results(authorization:str|None=Header(None)): auth(authorization); return await paper_engine.results()
+async def paper_results(authorization:str|None=Header(None)):
+    auth(authorization)
+    return await _paper_results_with_marks()
 @app.post('/api/paper/start')
 async def paper_start(authorization:str|None=Header(None)): auth(authorization); await paper_engine.start(); return paper_engine.public_state()
 @app.post('/api/paper/stop')
