@@ -6,6 +6,10 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from config import settings
 from ctrader_client import CTraderClient, CTraderError
+from alpaca_client import AlpacaClient
+from strategy_lab import StrategyLab
+from research_labs import ResearchLabs
+from research_coordinator import ResearchCoordinator
 from forex_lab import ForexStrategyLab
 from precision_lab import PrecisionStrategyLab
 from paper_trader import PaperTradingEngine
@@ -18,6 +22,10 @@ ctrader=CTraderClient(settings)
 forex_ctrader=CTraderClient(settings)
 precision_ctrader=CTraderClient(settings)
 paper_ctrader=CTraderClient(settings)
+alpaca=AlpacaClient(settings)
+strategy_lab=StrategyLab(settings,alpaca)
+research_labs=ResearchLabs(settings,alpaca)
+research_coordinator=ResearchCoordinator(strategy_lab,research_labs)
 forex_lab=ForexStrategyLab(settings,forex_ctrader)
 precision_lab=PrecisionStrategyLab(settings,precision_ctrader)
 paper_engine=PaperTradingEngine(settings,paper_ctrader)
@@ -54,6 +62,8 @@ async def restore_ctrader():
     return True
 
 async def autostart():
+    if settings.lab_auto_start: await strategy_lab.start()
+    if settings.research_auto_start: await research_coordinator.start()
     if settings.forex_lab_auto_start: await forex_lab.start()
     if settings.precision_lab_auto_start: await precision_lab.start()
     if settings.paper_trading_auto_start: await paper_engine.start()
@@ -63,6 +73,7 @@ async def lifespan(app: FastAPI):
     await restore_ctrader()
     await autostart(); yield
     await paper_engine.stop(); await precision_lab.stop(); await forex_lab.stop()
+    await research_coordinator.stop(); await research_labs.stop(); await strategy_lab.stop()
     await paper_ctrader.close(); await precision_ctrader.close(); await forex_ctrader.close(); await ctrader.close()
 
 app=FastAPI(title="ForexTrader Research",lifespan=lifespan)
@@ -70,7 +81,15 @@ def auth(a):
     if not settings.dashboard_token or a!=f"Bearer {settings.dashboard_token}": raise HTTPException(401,"Unauthorized")
 
 @app.get('/health')
-async def health(): return {'ok':True,'mode':'research-and-paper-only','live_trading_enabled':False,'forex_lab_running':forex_lab.state.running,'forex_stage':forex_lab.state.stage,'precision_lab_running':precision_lab.state.running,'precision_stage':precision_lab.state.stage,'paper_running':paper_engine.state.running,'paper_stage':paper_engine.state.stage,'ctrader_ready':ctrader.api_ready}
+async def health(): return {'ok':True,'mode':'research-and-paper-only','live_trading_enabled':False,'research_running':strategy_lab.state.running,'research_stage':strategy_lab.state.stage,'research_validation_running':research_labs.state.running,'research_coordinator_mode':research_coordinator.state.mode,'forex_lab_running':forex_lab.state.running,'forex_stage':forex_lab.state.stage,'precision_lab_running':precision_lab.state.running,'precision_stage':precision_lab.state.stage,'paper_running':paper_engine.state.running,'paper_stage':paper_engine.state.stage,'ctrader_ready':ctrader.api_ready}
+@app.get('/api/research/status')
+async def research_status(authorization:str|None=Header(None)): auth(authorization); return {'strategy':strategy_lab.public_state(),'validation':research_labs.public_state(),'coordinator':research_coordinator.public_state()}
+@app.get('/api/research/results')
+async def research_results(authorization:str|None=Header(None)): auth(authorization); return {'state':strategy_lab.public_state(),'results':strategy_lab.results(),'validation':research_labs.public_state(),'coordinator':research_coordinator.public_state()}
+@app.post('/api/research/start')
+async def research_start(authorization:str|None=Header(None)): auth(authorization); await strategy_lab.start(); await research_coordinator.start(); return {'strategy':strategy_lab.public_state(),'coordinator':research_coordinator.public_state()}
+@app.post('/api/research/stop')
+async def research_stop(authorization:str|None=Header(None)): auth(authorization); await research_coordinator.stop(); await research_labs.stop(); await strategy_lab.stop(); return {'strategy':strategy_lab.public_state(),'coordinator':research_coordinator.public_state()}
 @app.get('/api/forex-lab/status')
 async def fs(authorization:str|None=Header(None)): auth(authorization); return forex_lab.public_state()
 @app.get('/api/forex-lab/results')
