@@ -444,14 +444,24 @@ class PaperTradingStore:
                 dict(row) for row in await (
                     await conn.execute(
                         """
-                        SELECT d.paper_id, d.trade_date, d.start_balance, d.realized_pnl,
-                               d.end_balance, d.trade_count, d.wins, d.losses, d.open_positions,
-                               d.updated_at, s.strategy, s.params
-                        FROM microtrader_paper_daily d
-                        JOIN microtrader_paper_strategies s ON s.paper_id=d.paper_id
-                        WHERE s.status <> 'policy_rejected'
-                        ORDER BY d.trade_date DESC, d.paper_id
-                        LIMIT %s
+                        WITH ranked AS (
+                            SELECT d.paper_id, d.trade_date, d.start_balance, d.realized_pnl,
+                                   d.end_balance, d.trade_count, d.wins, d.losses, d.open_positions,
+                                   d.updated_at, s.strategy, s.params,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY d.paper_id
+                                       ORDER BY d.trade_date DESC
+                                   ) AS rn
+                            FROM microtrader_paper_daily d
+                            JOIN microtrader_paper_strategies s ON s.paper_id=d.paper_id
+                            WHERE s.status <> 'policy_rejected'
+                        )
+                        SELECT paper_id, trade_date, start_balance, realized_pnl,
+                               end_balance, trade_count, wins, losses, open_positions,
+                               updated_at, strategy, params
+                        FROM ranked
+                        WHERE rn <= %s
+                        ORDER BY trade_date DESC, paper_id
                         """,
                         (daily_limit,),
                     )
@@ -461,15 +471,26 @@ class PaperTradingStore:
                 dict(row) for row in await (
                     await conn.execute(
                         """
-                        SELECT t.id, t.paper_id, t.pair, t.side, t.entry_time, t.exit_time,
-                               t.entry_price, t.exit_price, t.exit_reason, t.risk_eur,
-                               t.r_multiple, t.pnl, t.balance_before, t.balance_after,
-                               s.strategy, s.params
-                        FROM microtrader_paper_trades t
-                        JOIN microtrader_paper_strategies s ON s.paper_id=t.paper_id
-                        WHERE s.status <> 'policy_rejected'
-                        ORDER BY t.exit_time DESC
-                        LIMIT %s
+                        WITH ranked AS (
+                            SELECT t.id, t.paper_id, t.pair, t.side, t.entry_time, t.exit_time,
+                                   t.entry_price, t.exit_price, t.exit_reason, t.risk_eur,
+                                   t.r_multiple, t.pnl, t.balance_before, t.balance_after,
+                                   s.strategy, s.params,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY t.paper_id
+                                       ORDER BY t.exit_time DESC, t.id DESC
+                                   ) AS rn
+                            FROM microtrader_paper_trades t
+                            JOIN microtrader_paper_strategies s ON s.paper_id=t.paper_id
+                            WHERE s.status <> 'policy_rejected'
+                        )
+                        SELECT id, paper_id, pair, side, entry_time, exit_time,
+                               entry_price, exit_price, exit_reason, risk_eur,
+                               r_multiple, pnl, balance_before, balance_after,
+                               strategy, params
+                        FROM ranked
+                        WHERE rn <= %s
+                        ORDER BY exit_time DESC, id DESC
                         """,
                         (trade_limit,),
                     )
