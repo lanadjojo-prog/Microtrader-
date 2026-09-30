@@ -190,7 +190,10 @@ class ForexStrategyStore:
 
 
     async def load_promoted(
-        self, limit: int = 100, min_trades_per_day: float = 0.0
+        self,
+        limit: int = 100,
+        min_trades_per_day: float = 0.0,
+        evaluation_policy_version: str = "",
     ) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
@@ -207,11 +210,41 @@ class ForexStrategyStore:
                 WHERE (promoted = TRUE OR status = 'promoted')
                   AND timeframe_min IN (1, 5)
                   AND COALESCE(params->>'entry_sessions', '') = 'london_new_york'
-                  AND COALESCE(robustness->>'evaluation_policy_version', '') = 'forex-funnel-v3-frozen-holdout20'
+                  AND COALESCE(robustness->>'evaluation_policy_version', '') = %s
                   AND COALESCE((oos->>'avg_trades_per_day')::double precision, 0) >= %s
                 ORDER BY tested_at ASC
                 LIMIT %s
                 """,
-                (float(min_trades_per_day), limit),
+                (
+                    str(evaluation_policy_version),
+                    float(min_trades_per_day),
+                    limit,
+                ),
+            )
+            return [dict(row) for row in await cur.fetchall()]
+
+
+    async def funnel_summary(
+        self, evaluation_policy_version: str
+    ) -> List[Dict[str, Any]]:
+        """Return uncapped active-policy funnel counts for dashboard/audit."""
+        if not self.enabled:
+            return []
+        async with await psycopg.AsyncConnection.connect(
+            self.database_url, row_factory=dict_row
+        ) as conn:
+            cur = await conn.execute(
+                """
+                SELECT COALESCE(family, strategy) AS family,
+                       COALESCE(status, 'rejected') AS funnel_stage,
+                       COUNT(*)::integer AS candidates
+                FROM microtrader_forex_strategy_runs
+                WHERE timeframe_min IN (1, 5)
+                  AND COALESCE(params->>'entry_sessions', '') = 'london_new_york'
+                  AND COALESCE(robustness->>'evaluation_policy_version', '') = %s
+                GROUP BY COALESCE(family, strategy), COALESCE(status, 'rejected')
+                ORDER BY funnel_stage, candidates DESC, family
+                """,
+                (str(evaluation_policy_version),),
             )
             return [dict(row) for row in await cur.fetchall()]
