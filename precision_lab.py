@@ -11,7 +11,14 @@ from typing import Dict, List, Optional
 from config import Settings
 from ctrader_client import CTraderClient
 from forex_data import ExternalForexData
-from precision_backtest import PrecisionCandidate, QuoteTick, candidate_grid, candidate_signature, evaluate_candidate
+from precision_backtest import (
+    PRECISION_EVALUATION_POLICY_VERSION,
+    PrecisionCandidate,
+    QuoteTick,
+    candidate_grid,
+    candidate_signature,
+    evaluate_candidate,
+)
 from precision_store import PrecisionStrategyStore
 
 log = logging.getLogger("microtrader.precision_lab")
@@ -24,6 +31,9 @@ def apply_frequency_gate(results: List[dict], min_trades_per_day: float) -> List
         item = dict(row)
         params = dict(item.get("params") or {})
         if str(params.get("entry_sessions") or "") != "london_new_york":
+            continue
+        execution = dict(item.get("execution_model") or {})
+        if str(execution.get("evaluation_policy_version") or "") != PRECISION_EVALUATION_POLICY_VERSION:
             continue
         oos = dict(item.get("oos") or {})
         observed = float(oos.get("avg_trades_per_day") or 0.0)
@@ -355,7 +365,7 @@ def dataset_version(bars: Dict[str, List[dict]], ticks: Dict[str, List[QuoteTick
 
 def evaluation_policy_key(settings: Settings) -> str:
     payload = {
-        "version": "precision-v2-policy-fingerprint",
+        "version": PRECISION_EVALUATION_POLICY_VERSION,
         "commission_pips_roundtrip": settings.precision_commission_pips,
         "stress_multiplier": settings.precision_stress_multiplier,
         "min_oos_trades": settings.precision_min_oos_trades,
