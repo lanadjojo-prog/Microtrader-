@@ -384,7 +384,9 @@ def evaluate_candidate(
     min_oos_trades: int = 80,
     min_profit_factor: float = 1.25,
     min_payoff_ratio: float = 1.8,
-    min_trades_per_day: float = 10.0,
+    min_trades_per_day: float = 3.0,
+    preferred_trades_per_day: float = 5.0,
+    target_trades_per_day: float = 10.0,
     start_capital: float = 50.0,
 ) -> dict:
     train_trades: List[dict] = []
@@ -457,9 +459,18 @@ def evaluate_candidate(
     score += min(20.0, max(0.0, (oos_metrics["profit_factor"] - 1.0) * 20.0))
     score += min(20.0, max(0.0, (oos_metrics["payoff_ratio"] - 1.0) * 10.0))
     score += 15.0 * min(1.0, positive_pair_ratio)
-    score += 10.0 * min(1.0, oos_metrics["trades"] / max(1, min_oos_trades))
+    score += 5.0 * min(1.0, oos_metrics["trades"] / max(1, min_oos_trades))
+    avg_tpd = float(oos_metrics.get("avg_trades_per_day") or 0.0)
+    if avg_tpd >= preferred_trades_per_day:
+        span = max(0.1, target_trades_per_day - preferred_trades_per_day)
+        frequency_bonus = 2.5 + 2.5 * min(
+            1.0, max(0.0, (avg_tpd - preferred_trades_per_day) / span)
+        )
+    else:
+        frequency_bonus = 0.0
+    score += frequency_bonus
     score += min(10.0, max(0.0, stress_metrics["expectancy_r"] * 10.0))
-    score = round(score, 2)
+    score = round(min(100.0, score), 2)
 
     raw_pass = not reasons
     phase = str(candidate.params.get("_phase", "discovery"))
@@ -522,6 +533,9 @@ def evaluate_candidate(
             "cost_bps_per_side": cost_bps,
             "conservative_same_bar_stop_first": True,
             "min_trades_per_day": float(min_trades_per_day),
+            "preferred_trades_per_day": float(preferred_trades_per_day),
+            "target_trades_per_day": float(target_trades_per_day),
+            "frequency_score_bonus": round(float(frequency_bonus), 3),
             "observed_oos_avg_trades_per_day": float(
                 oos_metrics.get("avg_trades_per_day") or 0.0
             ),
