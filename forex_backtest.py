@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 from forex_metrics import strategy_metrics
 from market_filters import entry_allowed
 
-FOREX_EVALUATION_POLICY_VERSION = "forex-funnel-v5-cost-adjusted-breakeven"
+FOREX_EVALUATION_POLICY_VERSION = "forex-funnel-v6-staged-trade-management"
 
 
 @dataclass(frozen=True)
@@ -32,14 +32,10 @@ def candidate_grid() -> List[ForexCandidate]:
     out: List[ForexCandidate] = []
     for tf in (1, 5):
         for target_r in (2.0, 3.0, 4.0, 5.0, 8.0):
-            exit_modes = ("baseline",) if target_r <= 2.0 else (
-                "baseline",
-                "breakeven_2r",
-                "protect_2r_025r",
-                "lock_2r_05r",
-            )
+            # Keep Discovery CPU-light. Trade-management variants are generated
+            # only after a baseline candidate earns Incubator status.
             for stop_atr in (0.5, 0.75, 1.0):
-                for exit_mode in exit_modes:
+                for exit_mode in ("baseline",):
                     common = {
                         "timeframe_min": tf,
                         "target_r": target_r,
@@ -125,13 +121,19 @@ def _exit_management(
     slippage. Therefore a BE stop is not placed at the raw entry price.
     """
     mode = str(params.get("exit_mode") or "baseline")
-    desired_net_r = None
-    if mode == "breakeven_2r":
+    trigger_r = params.get("management_trigger_r")
+    desired_net_r = params.get("management_lock_net_r")
+
+    if trigger_r is not None and desired_net_r is not None:
+        trigger_r = float(trigger_r)
+        desired_net_r = max(0.0, float(desired_net_r))
+    elif mode == "breakeven_2r":
+        trigger_r = 2.0
         desired_net_r = max(0.0, float(params.get("breakeven_buffer_r", 0.05)))
     elif mode == "protect_2r_025r":
-        desired_net_r = 0.25
+        trigger_r, desired_net_r = 2.0, 0.25
     elif mode == "lock_2r_05r":
-        desired_net_r = 0.50
+        trigger_r, desired_net_r = 2.0, 0.50
     else:
         return None, None
 
@@ -140,7 +142,7 @@ def _exit_management(
     cost_r = roundtrip_cost_pct / risk_pct if risk_pct > 0 else 0.0
     # lock_r is a GROSS price-distance in R. Adding cost_r means that after
     # modeled round-trip costs, the intended NET lock remains +0.05/+0.25/+0.50R.
-    return 2.0, cost_r + float(desired_net_r)
+    return float(trigger_r), cost_r + float(desired_net_r)
 
 
 def _run_asymmetric_exit(
@@ -580,7 +582,9 @@ def evaluate_candidate(
             "conservative_same_bar_stop_first": True,
             "trade_management_net_of_costs": True,
             "breakeven_net_lock_r": float(candidate.params.get("breakeven_buffer_r", 0.05)),
-            "profit_lock_modes_net_r": [0.25, 0.50],
+            "profit_lock_modes_net_r": [0.05, 0.25, 0.50],
+            "management_trigger_grid_r": [1.0, 1.5, 2.0],
+            "management_search_stage": "incubator_only",
             "min_trades_per_day": float(min_trades_per_day),
             "preferred_trades_per_day": float(preferred_trades_per_day),
             "target_trades_per_day": float(target_trades_per_day),
