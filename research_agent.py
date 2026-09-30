@@ -121,7 +121,7 @@ class ResearchAgent:
         for r in results:
             family_rows[str(r.get("family") or r.get("strategy") or "unknown")].append(r)
             tf = int((r.get("params") or {}).get("timeframe_min") or 0)
-            if tf:
+            if tf in (1, 5):
                 tf_rows[tf].append(r)
 
         family_summary = []
@@ -181,7 +181,7 @@ class ResearchAgent:
         tf_summary.sort(key=lambda x: (x["best_score"], x["best_expectancy_bps"]), reverse=True)
 
         focus_families = [x["family"] for x in focus]
-        focus_timeframes = [int(x["timeframe"]) for x in tf_summary[:2]] or [1, 3]
+        focus_timeframes = [int(x["timeframe"]) for x in tf_summary[:2] if int(x["timeframe"]) in (1, 5)] or [1, 5]
         hypotheses = self._make_hypotheses(focus, tf_summary, results)
 
         decision = {
