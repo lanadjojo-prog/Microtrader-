@@ -55,6 +55,17 @@ def _atr(bars: List[dict], i: int, window: int = 14) -> float:
     return mean(vals) if vals else 0.0
 
 
+def _exit_management(params: dict) -> tuple[float | None, float | None]:
+    mode = str(params.get("exit_mode") or "baseline")
+    if mode == "breakeven_2r":
+        return 2.0, 0.0
+    if mode == "protect_2r_025r":
+        return 2.0, 0.25
+    if mode == "lock_2r_05r":
+        return 2.0, 0.50
+    return None, None
+
+
 def _signal(strategy: str, params: dict, bars: List[dict], i: int) -> int:
     if i < 2:
         return 0
@@ -159,16 +170,36 @@ class PaperTradingEngine:
             strategy = str(row.get("strategy") or "")
             if strategy not in self.SUPPORTED:
                 continue
-            params = {k: v for k, v in dict(row.get("params") or {}).items() if k != "_phase"}
-            await self.store.ensure_strategy(
-                paper_id=_paper_id(row),
-                promoted_run_id=str(row.get("run_id") or ""),
-                strategy=strategy,
-                params=params,
-                pairs=list(row.get("pairs") or self.settings.forex_pairs),
-                timeframe_min=int(row.get("timeframe_min") or params.get("timeframe_min") or 1),
-                start_balance=float(self.settings.paper_start_balance),
-            )
+            base_params = {
+                k: v for k, v in dict(row.get("params") or {}).items()
+                if k != "_phase"
+            }
+            # Older promoted runs predate exit-management testing. Keep their
+            # frozen baseline untouched and add a simultaneous +2R -> +0.25R
+            # protection variant for clean forward comparison.
+            if "exit_mode" in base_params:
+                variants = [base_params]
+            else:
+                variants = [
+                    dict(base_params),
+                    {**base_params, "exit_mode": "protect_2r_025r"},
+                ]
+
+            for params in variants:
+                variant_row = {**row, "params": params}
+                await self.store.ensure_strategy(
+                    paper_id=_paper_id(variant_row),
+                    promoted_run_id=str(row.get("run_id") or ""),
+                    strategy=strategy,
+                    params=params,
+                    pairs=list(row.get("pairs") or self.settings.forex_pairs),
+                    timeframe_min=int(
+                        row.get("timeframe_min")
+                        or params.get("timeframe_min")
+                        or 1
+                    ),
+                    start_balance=float(self.settings.paper_start_balance),
+                )
         strategies = await self.store.list_strategies()
         self.state.strategies = len(strategies)
         return strategies
@@ -302,6 +333,36 @@ class PaperTradingEngine:
 
         await self.store.touch_daily(paper_id, len(positions))
 
+    def _maybe_protect_stop(self, pos: dict, bar: dict, params: dict) -> bool:
+        trigger_r, lock_r = _exit_management(params)
+        if trigger_r is None or lock_r is None:
+            return False
+        direction = int(pos["direction"])
+        entry = float(pos["entry_price"])
+        risk_distance = float(pos["risk_distance"])
+        current_stop = float(pos["stop_price"])
+        protected_stop = (
+            entry + risk_distance * lock_r
+            if direction > 0
+            else entry - risk_distance * lock_r
+        )
+        # Already at least this well protected.
+        if direction > 0 and current_stop >= protected_stop:
+            return False
+        if direction < 0 and current_stop <= protected_stop:
+            return False
+        trigger_price = (
+            entry + risk_distance * trigger_r
+            if direction > 0
+            else entry - risk_distance * trigger_r
+        )
+        high, low = float(bar["h"]), float(bar["l"])
+        reached = high >= trigger_price if direction > 0 else low <= trigger_price
+        if reached:
+            pos["stop_price"] = protected_stop
+            return True
+        return False
+
     async def _manage_entry_bar(
         self, paper_id: str, pair: str, pos: dict, bar: dict, params: dict
     ) -> bool:
@@ -320,6 +381,8 @@ class PaperTradingEngine:
         if direction < 0 and low <= target:
             await self._close(paper_id, pair, pos, bar, target, "target")
             return True
+        # Protection earned on this candle becomes active from the next candle.
+        self._maybe_protect_stop(pos, bar, params)
         return False
 
     async def _manage_existing(
@@ -340,6 +403,10 @@ class PaperTradingEngine:
         if direction < 0 and low <= target:
             await self._close(paper_id, pair, pos, bar, target, "target")
             return True
+
+        # Same conservative rule as the backtest: a stop improvement earned
+        # within this candle becomes active on the next candle.
+        self._maybe_protect_stop(pos, bar, params)
 
         held = int(pos.get("bars_held", 0)) + 1
         if held >= int(params.get("max_hold", 36)):
