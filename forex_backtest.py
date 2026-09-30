@@ -29,26 +29,34 @@ def candidate_grid() -> List[ForexCandidate]:
     out: List[ForexCandidate] = []
     for tf in (1, 5, 15):
         for target_r in (2.0, 3.0, 4.0, 5.0, 8.0):
+            exit_modes = ("baseline",) if target_r <= 2.0 else (
+                "baseline",
+                "breakeven_2r",
+                "protect_2r_025r",
+                "lock_2r_05r",
+            )
             for stop_atr in (0.5, 0.75, 1.0):
-                common = {
-                    "timeframe_min": tf,
-                    "target_r": target_r,
-                    "stop_atr": stop_atr,
-                    "risk_eur": 0.75,
-                    "_phase": "discovery",
-                }
-                out.append(ForexCandidate(
-                    "asymmetric_breakout",
-                    {**common, "window": 20, "max_hold": 48},
-                ))
-                out.append(ForexCandidate(
-                    "trend_pullback",
-                    {**common, "fast": 10, "slow": 30, "max_hold": 36},
-                ))
-                out.append(ForexCandidate(
-                    "range_reversal",
-                    {**common, "window": 30, "z_entry": 1.8, "max_hold": 36},
-                ))
+                for exit_mode in exit_modes:
+                    common = {
+                        "timeframe_min": tf,
+                        "target_r": target_r,
+                        "stop_atr": stop_atr,
+                        "risk_eur": 0.75,
+                        "exit_mode": exit_mode,
+                        "_phase": "discovery",
+                    }
+                    out.append(ForexCandidate(
+                        "asymmetric_breakout",
+                        {**common, "window": 20, "max_hold": 48},
+                    ))
+                    out.append(ForexCandidate(
+                        "trend_pullback",
+                        {**common, "fast": 10, "slow": 30, "max_hold": 36},
+                    ))
+                    out.append(ForexCandidate(
+                        "range_reversal",
+                        {**common, "window": 30, "z_entry": 1.8, "max_hold": 36},
+                    ))
     return out
 
 
@@ -96,6 +104,17 @@ def _trade(
     }
 
 
+def _exit_management(params: dict) -> tuple[float | None, float | None]:
+    mode = str(params.get("exit_mode") or "baseline")
+    if mode == "breakeven_2r":
+        return 2.0, 0.0
+    if mode == "protect_2r_025r":
+        return 2.0, 0.25
+    if mode == "lock_2r_05r":
+        return 2.0, 0.50
+    return None, None
+
+
 def _run_asymmetric_exit(
     bars: List[dict],
     entry_idx: int,
@@ -105,6 +124,7 @@ def _run_asymmetric_exit(
     risk_distance: float,
     target_r: float,
     max_hold: int,
+    params: dict,
 ) -> tuple[int, float]:
     if direction > 0:
         stop = entry - risk_distance
@@ -116,12 +136,17 @@ def _run_asymmetric_exit(
     last_idx = min(entry_idx + max_hold, len(bars) - 1)
     exit_price = float(bars[last_idx]["c"])
 
+    trigger_r, lock_r = _exit_management(params)
+    protection_active = False
+
     for j in range(entry_idx, last_idx + 1):
         low = float(bars[j]["l"])
         high = float(bars[j]["h"])
 
-        # Conservative assumption when stop and target are both touched in
-        # one candle: the stop is assumed to have happened first.
+        # Conservative OHLC sequencing: the stop that was active at the start
+        # of the candle is checked before the target. A newly earned protective
+        # stop only becomes active on the NEXT candle, so we never use unknown
+        # intrabar ordering to make the result look better.
         if direction > 0:
             if low <= stop:
                 return j, stop
@@ -132,6 +157,21 @@ def _run_asymmetric_exit(
                 return j, stop
             if low <= target:
                 return j, target
+
+        if trigger_r is not None and lock_r is not None and not protection_active:
+            trigger_price = (
+                entry + risk_distance * trigger_r
+                if direction > 0
+                else entry - risk_distance * trigger_r
+            )
+            reached = high >= trigger_price if direction > 0 else low <= trigger_price
+            if reached:
+                stop = (
+                    entry + risk_distance * lock_r
+                    if direction > 0
+                    else entry - risk_distance * lock_r
+                )
+                protection_active = True
     return last_idx, exit_price
 
 
@@ -170,6 +210,7 @@ def _simulate_asymmetric_breakout(
         exit_idx, exit_price = _run_asymmetric_exit(
             bars, i, direction=direction, entry=entry,
             risk_distance=risk_distance, target_r=target_r, max_hold=max_hold,
+            params=p,
         )
         trades.append(_trade(
             pair, bars[i], bars[exit_idx], entry, exit_price,
@@ -220,6 +261,7 @@ def _simulate_trend_pullback(
         exit_idx, exit_price = _run_asymmetric_exit(
             bars, i, direction=direction, entry=entry,
             risk_distance=risk_distance, target_r=target_r, max_hold=max_hold,
+            params=p,
         )
         trades.append(_trade(
             pair, bars[i], bars[exit_idx], entry, exit_price,
@@ -268,6 +310,7 @@ def _simulate_range_reversal(
         exit_idx, exit_price = _run_asymmetric_exit(
             bars, i, direction=direction, entry=entry,
             risk_distance=risk_distance, target_r=target_r, max_hold=max_hold,
+            params=p,
         )
         trades.append(_trade(
             pair, bars[i], bars[exit_idx], entry, exit_price,
