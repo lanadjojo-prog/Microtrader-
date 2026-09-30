@@ -25,6 +25,7 @@ validation_ctrader=CTraderClient(settings)
 forex_ctrader=CTraderClient(settings)
 precision_ctrader=CTraderClient(settings)
 paper_ctrader=CTraderClient(settings)
+mark_ctrader=CTraderClient(settings)
 strategy_lab=StrategyLab(settings,research_ctrader)
 research_labs=ResearchLabs(settings,validation_ctrader)
 research_agent=ResearchAgent(settings,strategy_lab)
@@ -47,6 +48,7 @@ async def restore_ctrader():
     forex_ctrader.set_runtime_tokens(access,refresh)
     precision_ctrader.set_runtime_tokens(access,refresh)
     paper_ctrader.set_runtime_tokens(access,refresh)
+    mark_ctrader.set_runtime_tokens(access,refresh)
     try:
         await ctrader.connect_and_authenticate()
     except Exception:
@@ -62,6 +64,7 @@ async def restore_ctrader():
             forex_ctrader.set_runtime_tokens(access,refresh)
             precision_ctrader.set_runtime_tokens(access,refresh)
             paper_ctrader.set_runtime_tokens(access,refresh)
+            mark_ctrader.set_runtime_tokens(access,refresh)
             await ctrader.connect_and_authenticate()
         except Exception:
             logging.getLogger("microtrader").exception("Could not restore cTrader session")
@@ -96,7 +99,7 @@ async def lifespan(app: FastAPI):
     await autostart(); yield
     await paper_engine.stop(); await precision_lab.stop(); await forex_lab.stop()
     await research_coordinator.stop(); await research_agent.stop(); await research_labs.stop(); await strategy_lab.stop()
-    await paper_ctrader.close(); await precision_ctrader.close(); await forex_ctrader.close()
+    await mark_ctrader.close(); await paper_ctrader.close(); await precision_ctrader.close(); await forex_ctrader.close()
     await validation_ctrader.close(); await research_ctrader.close(); await ctrader.close()
 
 app=FastAPI(title="ForexTrader Research",lifespan=lifespan)
@@ -142,7 +145,7 @@ async def _paper_results_with_marks():
             pair = str(row.get("pair") or "")
             key = (pair, tf)
             if key not in cache:
-                bars = await paper_ctrader.historical_bars(
+                bars = await mark_ctrader.historical_bars(
                     pair, timeframe_min=tf, max_bars=5, lookback_days=1
                 )
                 cache[key] = float(bars[-1]["c"]) if bars else None
@@ -194,6 +197,7 @@ async def cb(code:str=''):
         forex_ctrader.set_runtime_tokens(ctrader.active_access_token, ctrader.active_refresh_token)
         precision_ctrader.set_runtime_tokens(ctrader.active_access_token, ctrader.active_refresh_token)
         paper_ctrader.set_runtime_tokens(ctrader.active_access_token, ctrader.active_refresh_token)
+        mark_ctrader.set_runtime_tokens(ctrader.active_access_token, ctrader.active_refresh_token)
         state=await ctrader.connect_and_authenticate()
         await autostart()
         return HTMLResponse(f"<h3>Fusion Markets demo connected</h3><p>{state.get('environment','-')} · account {state.get('account_id','-')}</p><p>Research labs zijn gestart waar mogelijk. Live orders staan uit.</p>")
