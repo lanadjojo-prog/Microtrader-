@@ -14,6 +14,8 @@ from ctrader_client import CTraderClient
 from forex_store import ForexStrategyStore
 from forex_backtest import FOREX_EVALUATION_POLICY_VERSION
 from paper_store import PaperTradingStore
+from research_store import ResearchStore
+from strategy_lab import RESEARCH_POLICY_VERSION
 from market_filters import entry_allowed
 
 log = logging.getLogger("microtrader.paper")
@@ -72,14 +74,28 @@ def _exit_management(params: dict) -> tuple[float | None, float | None]:
     return None, None
 
 
-def _signal(strategy: str, params: dict, bars: List[dict], i: int) -> int:
+def _rolling_vwap(bars: List[dict], a: int, b: int) -> float:
+    sample = bars[a:b]
+    if not sample:
+        return 0.0
+    pv = 0.0
+    vol = 0.0
+    for x in sample:
+        v = float(x.get("v") or 0.0)
+        typ = (float(x["h"]) + float(x["l"]) + float(x["c"])) / 3.0
+        pv += typ * v
+        vol += v
+    return pv / vol if vol > 0 else mean(float(x["c"]) for x in sample)
+
+
+def _forex_signal(strategy: str, params: dict, bars: List[dict], i: int) -> int:
     if i < 2:
         return 0
     if strategy == "range_reversal":
         window = int(params.get("window", 30))
         if i < window:
             return 0
-        closes = [float(x["c"]) for x in bars[i - window:i]]
+        closes = [float(x["c"]) for x in bars[i-window:i]]
         mu = mean(closes)
         sigma = pstdev(closes)
         if sigma <= 0:
@@ -93,7 +109,7 @@ def _signal(strategy: str, params: dict, bars: List[dict], i: int) -> int:
         slow = int(params.get("slow", 30))
         if i < slow:
             return 0
-        closes = [float(x["c"]) for x in bars[i - slow:i]]
+        closes = [float(x["c"]) for x in bars[i-slow:i]]
         fast_ma = mean(closes[-fast:])
         slow_ma = mean(closes)
         prev_close = closes[-1]
@@ -107,13 +123,176 @@ def _signal(strategy: str, params: dict, bars: List[dict], i: int) -> int:
         window = int(params.get("window", 20))
         if i < window + 2:
             return 0
-        prior = bars[i - window - 1:i - 1]
-        prev_close = float(bars[i - 1]["c"])
+        prior = bars[i-window-1:i-1]
+        prev_close = float(bars[i-1]["c"])
         high_break = max(float(x["h"]) for x in prior)
         low_break = min(float(x["l"]) for x in prior)
         return 1 if prev_close > high_break else (-1 if prev_close < low_break else 0)
 
     return 0
+
+
+def _research_signal(strategy: str, params: dict, bars: List[dict], i: int) -> int:
+    """Forward signal equivalent of the Research Lab candidate families."""
+    if i < 2:
+        return 0
+
+    if strategy == "momentum":
+        slow = int(params["slow"])
+        fast = int(params["fast"])
+        if i < slow:
+            return 0
+        history = [float(x["c"]) for x in bars[i-slow:i]]
+        fast_ma = mean(history[-fast:])
+        slow_ma = mean(history)
+        edge_bps = ((fast_ma / slow_ma) - 1.0) * 10_000 if slow_ma else 0.0
+        threshold = float(params["entry_bps"])
+        return 1 if edge_bps >= threshold else (-1 if edge_bps <= -threshold else 0)
+
+    if strategy == "mean_reversion":
+        window = int(params["window"])
+        if i < window:
+            return 0
+        history = [float(x["c"]) for x in bars[i-window:i]]
+        mu = mean(history)
+        sigma = pstdev(history)
+        if sigma <= 0:
+            return 0
+        z = (history[-1] - mu) / sigma
+        threshold = float(params["z_entry"])
+        return 1 if z <= -threshold else (-1 if z >= threshold else 0)
+
+    if strategy == "breakout":
+        window = int(params["window"])
+        if i < window + 1:
+            return 0
+        prior = bars[i-window-1:i-1]
+        if not prior:
+            return 0
+        buf = float(params.get("buffer_bps", 0.0)) / 10_000.0
+        px = float(bars[i-1]["c"])
+        high_level = max(float(x["h"]) for x in prior) * (1.0 + buf)
+        low_level = min(float(x["l"]) for x in prior) * (1.0 - buf)
+        return 1 if px > high_level else (-1 if px < low_level else 0)
+
+    if strategy == "extreme_reversal":
+        window = int(params["window"])
+        if i < window + 1:
+            return 0
+        rets = [
+            float(bars[j]["c"]) / float(bars[j-1]["c"]) - 1.0
+            for j in range(i-window, i)
+        ]
+        sigma = pstdev(rets) if len(rets) > 1 else 0.0
+        if sigma <= 0:
+            return 0
+        threshold = float(params["shock_z"]) * sigma
+        return 1 if rets[-1] <= -threshold else (-1 if rets[-1] >= threshold else 0)
+
+    if strategy == "volatility_breakout":
+        window = int(params["window"])
+        if i < window + 1:
+            return 0
+        ranges = [float(x["h"]) - float(x["l"]) for x in bars[i-window:i]]
+        avg_range = mean(ranges) if ranges else 0.0
+        cur = float(bars[i-1]["h"]) - float(bars[i-1]["l"])
+        if avg_range <= 0 or cur < avg_range * float(params["vol_mult"]):
+            return 0
+        o = float(bars[i-1]["o"])
+        cl = float(bars[i-1]["c"])
+        return 1 if cl > o else (-1 if cl < o else 0)
+
+    if strategy == "trend_pullback":
+        slow = int(params["slow"])
+        fast = int(params["fast"])
+        if i < slow:
+            return 0
+        closes = [float(x["c"]) for x in bars[i-slow:i]]
+        f = mean(closes[-fast:])
+        s = mean(closes)
+        sd = pstdev(closes)
+        z = (closes[-1] - f) / sd if sd > 0 else 0.0
+        threshold = float(params["pullback_z"])
+        return 1 if (f > s and z <= -threshold) else (-1 if (f < s and z >= threshold) else 0)
+
+    if strategy == "vwap_reversion":
+        window = int(params["window"])
+        if i < window:
+            return 0
+        vw = _rolling_vwap(bars, i-window, i)
+        closes = [float(x["c"]) for x in bars[i-window:i]]
+        sd = pstdev(closes)
+        z = (closes[-1] - vw) / sd if sd > 0 else 0.0
+        threshold = float(params["z_entry"])
+        return 1 if z <= -threshold else (-1 if z >= threshold else 0)
+
+    if strategy == "vwap_momentum":
+        window = int(params["window"])
+        if i < window:
+            return 0
+        vw = _rolling_vwap(bars, i-window, i)
+        px = float(bars[i-1]["c"])
+        edge = ((px / vw) - 1.0) * 10_000 if vw > 0 else 0.0
+        threshold = float(params["buffer_bps"])
+        return 1 if edge >= threshold else (-1 if edge <= -threshold else 0)
+
+    if strategy == "asymmetric_breakout":
+        window = int(params["window"])
+        if i < max(window + 1, 15):
+            return 0
+        prior = bars[i-window-1:i-1]
+        if not prior:
+            return 0
+        prev = float(bars[i-1]["c"])
+        high_break = max(float(x["h"]) for x in prior)
+        low_break = min(float(x["l"]) for x in prior)
+        return 1 if prev > high_break else (-1 if prev < low_break else 0)
+
+    return 0
+
+
+def _signal(strategy: str, params: dict, bars: List[dict], i: int) -> int:
+    if str(params.get("_paper_source") or "forex") == "research":
+        return _research_signal(strategy, params, bars, i)
+    return _forex_signal(strategy, params, bars, i)
+
+
+def _research_exit_reason(
+    strategy: str,
+    params: dict,
+    bars: List[dict],
+    i: int,
+    direction: int,
+) -> str | None:
+    """Native Research Lab signal exits evaluated on fully closed bars."""
+    j = i + 1
+    if strategy == "momentum":
+        slow = int(params["slow"])
+        fast = int(params["fast"])
+        if j < slow:
+            return None
+        trailing = [float(x["c"]) for x in bars[j-slow:j]]
+        f = mean(trailing[-fast:])
+        s = mean(trailing)
+        edge = ((f / s) - 1.0) * 10_000 if s else 0.0
+        if (direction > 0 and edge <= 0) or (direction < 0 and edge >= 0):
+            return "research_signal_exit"
+
+    if strategy == "mean_reversion":
+        window = int(params["window"])
+        if j < window:
+            return None
+        trailing = [float(x["c"]) for x in bars[j-window:j]]
+        mu = mean(trailing)
+        sigma = pstdev(trailing)
+        if sigma <= 0:
+            return None
+        z = (trailing[-1] - mu) / sigma
+        z_exit = float(params.get("z_exit", 0.0))
+        if (direction > 0 and z >= -z_exit) or (direction < 0 and z <= z_exit):
+            return "research_mean_exit"
+
+    return None
 
 
 def _causal_close_entry(
@@ -173,12 +352,17 @@ class PaperTradingEngine:
     tracked from EUR 50 using subsequent cTrader market bars only.
     """
 
-    SUPPORTED = {"range_reversal", "trend_pullback", "asymmetric_breakout"}
+    SUPPORTED = {
+        "range_reversal", "trend_pullback", "asymmetric_breakout",
+        "momentum", "mean_reversion", "breakout", "extreme_reversal",
+        "volatility_breakout", "vwap_reversion", "vwap_momentum",
+    }
 
     def __init__(self, settings: Settings, client: CTraderClient):
         self.settings = settings
         self.client = client
         self.research_store = ForexStrategyStore(settings.database_url)
+        self.validation_store = ResearchStore(settings.database_url)
         self.store = PaperTradingStore(settings.database_url)
         self.state = PaperTradingState()
         self._task: Optional[asyncio.Task] = None
@@ -199,6 +383,11 @@ class PaperTradingEngine:
         payload["strategy_preferred_trades_per_day"] = self.settings.strategy_preferred_trades_per_day
         payload["strategy_target_trades_per_day"] = self.settings.strategy_target_trades_per_day
         payload["portfolio_min_trades_per_day"] = self.settings.portfolio_min_trades_per_day
+        payload["frequency_policy"] = (
+            "hard >=3/day per strategy; preference 5-10/day; "
+            "portfolio target >=10/day combined"
+        )
+        payload["paper_sources"] = ["forex_promoted", "research_promoted_17of17_validated"]
         return payload
 
     async def start(self) -> None:
@@ -232,42 +421,46 @@ class PaperTradingEngine:
         }
 
     async def _discover(self) -> List[dict]:
-        promoted = await self.research_store.load_promoted(
+        forex_promoted = await self.research_store.load_promoted(
             limit=100,
             min_trades_per_day=self.settings.strategy_min_trades_per_day,
             evaluation_policy_version=FOREX_EVALUATION_POLICY_VERSION,
         )
+        research_validated = await self.validation_store.load_paper_eligible_validations(
+            research_policy_version=RESEARCH_POLICY_VERSION,
+            min_trades_per_day=self.settings.strategy_min_trades_per_day,
+            limit=100,
+        )
+
         eligible_ids: set[str] = set()
         portfolio_sources: set[str] = set()
         expected_portfolio_trades_per_day = 0.0
-        for row in promoted:
+
+        # Native Forex Lab promotions.
+        for row in forex_promoted:
             strategy = str(row.get("strategy") or "")
             if strategy not in self.SUPPORTED:
                 continue
-            base_tf = int(row.get("timeframe_min") or (row.get("params") or {}).get("timeframe_min") or 0)
+            base_tf = int(
+                row.get("timeframe_min")
+                or (row.get("params") or {}).get("timeframe_min")
+                or 0
+            )
             if base_tf not in (1, 5):
                 continue
             base_params = {
                 k: v for k, v in dict(row.get("params") or {}).items()
                 if k != "_phase"
             }
+            base_params["_paper_source"] = "forex"
             source_key = _paper_id({**row, "params": base_params})
             if source_key not in portfolio_sources:
                 portfolio_sources.add(source_key)
                 expected_portfolio_trades_per_day += float(
                     (row.get("oos") or {}).get("avg_trades_per_day") or 0.0
                 )
-            # Older promoted runs predate exit-management testing. Keep their
-            # frozen baseline untouched and add a simultaneous +2R -> +0.25R
-            # protection variant for clean forward comparison.
-            if "exit_mode" in base_params:
-                variants = [base_params]
-            else:
-                variants = [
-                    dict(base_params),
-                    {**base_params, "exit_mode": "protect_2r_025r"},
-                ]
 
+            variants = [base_params]
             for params in variants:
                 variant_row = {**row, "params": params}
                 paper_id = _paper_id(variant_row)
@@ -278,13 +471,49 @@ class PaperTradingEngine:
                     strategy=strategy,
                     params=params,
                     pairs=list(row.get("pairs") or self.settings.forex_pairs),
-                    timeframe_min=int(
-                        row.get("timeframe_min")
-                        or params.get("timeframe_min")
-                        or 1
-                    ),
+                    timeframe_min=base_tf,
                     start_balance=float(self.settings.paper_start_balance),
                 )
+
+        # Research candidates enter Paper only after BOTH Research promotion
+        # and a completed exact 17/17 validation under the current policy.
+        for row in research_validated:
+            strategy = str(row.get("strategy") or "")
+            if strategy not in self.SUPPORTED:
+                continue
+            params = {
+                k: v for k, v in dict(row.get("params") or {}).items()
+                if k not in {"_phase", "_policy_version"}
+            }
+            tf = int(params.get("timeframe_min") or 0)
+            if tf not in (1, 5):
+                continue
+            params["_paper_source"] = "research"
+            params["_paper_exit_model"] = "research_native"
+            params.setdefault("risk_eur", 0.75)
+            params.setdefault("stop_atr", 1.0)
+
+            source_row = {
+                "strategy": strategy,
+                "params": params,
+                "pairs": list(self.settings.forex_pairs),
+            }
+            paper_id = _paper_id(source_row)
+            eligible_ids.add(paper_id)
+            if paper_id not in portfolio_sources:
+                portfolio_sources.add(paper_id)
+                expected_portfolio_trades_per_day += float(
+                    (row.get("oos") or {}).get("avg_trades_per_day") or 0.0
+                )
+            await self.store.ensure_strategy(
+                paper_id=paper_id,
+                promoted_run_id="research-validation:" + str(row.get("candidate_signature") or ""),
+                strategy=strategy,
+                params=params,
+                pairs=list(self.settings.forex_pairs),
+                timeframe_min=tf,
+                start_balance=float(self.settings.paper_start_balance),
+            )
 
         strategies = await self.store.list_strategies()
         for row in strategies:
@@ -296,8 +525,6 @@ class PaperTradingEngine:
                 row["status"] = "active"
             elif paper_id not in eligible_ids:
                 if open_positions and status in {"active", "frequency_rejected", "retiring"}:
-                    # Never orphan or silently delete an open forward position.
-                    # Retiring strategies manage exits but cannot open new trades.
                     if status != "retiring":
                         await self.store.set_status(paper_id, "retiring")
                     row["status"] = "retiring"
@@ -325,6 +552,7 @@ class PaperTradingEngine:
         try:
             await self.store.init()
             await self.research_store.init()
+            await self.validation_store.init()
             while self.state.running:
                 try:
                     strategies = await self._discover()
@@ -338,11 +566,12 @@ class PaperTradingEngine:
                             else "building_portfolio"
                         )
                         self.state.message = (
-                            f"Paper trading {self.state.strategies} eligible promoted "
+                            f"Paper trading {self.state.strategies} eligible promoted/validated "
                             f"strateg{'y' if self.state.strategies==1 else 'ies'} from €{self.settings.paper_start_balance:.0f}; "
                             f"strategy hard minimum {self.settings.strategy_min_trades_per_day:g}/day; "
-                            f"portfolio frequency {self.state.expected_portfolio_trades_per_day:.1f}/"
-                            f"{self.settings.portfolio_min_trades_per_day:g} trades/day."
+                            f"combined portfolio target {self.state.expected_portfolio_trades_per_day:.1f}/"
+                            f"{self.settings.portfolio_min_trades_per_day:g} trades/day "
+                            f"(not a hard per-strategy requirement)."
                         )
                         for row in strategies:
                             if not self.state.running:
@@ -413,7 +642,8 @@ class PaperTradingEngine:
                 pos = positions.get(pair)
                 if pos:
                     exited = await self._manage_existing(
-                        paper_id, pair, pos, bar, params
+                        paper_id, pair, pos, bar, params,
+                        strategy=strategy, bars=closed, index=i,
                     )
                     if exited:
                         positions.pop(pair, None)
@@ -517,9 +747,40 @@ class PaperTradingEngine:
         return False
 
     async def _manage_existing(
-        self, paper_id: str, pair: str, pos: dict, bar: dict, params: dict
+        self,
+        paper_id: str,
+        pair: str,
+        pos: dict,
+        bar: dict,
+        params: dict,
+        *,
+        strategy: str,
+        bars: List[dict],
+        index: int,
     ) -> bool:
         direction = int(pos["direction"])
+        source = str(params.get("_paper_source") or "forex")
+
+        # Research-native families are papered with the same logical exit
+        # family as Research Lab: momentum/mean-reversion signal exits and
+        # otherwise max-hold. ATR is only the 1R sizing/accounting unit here.
+        if source == "research" and strategy != "asymmetric_breakout":
+            reason = _research_exit_reason(
+                strategy, params, bars, index, direction
+            )
+            if reason:
+                await self._close(
+                    paper_id, pair, pos, bar, float(bar["c"]), reason
+                )
+                return True
+            held = int(pos.get("bars_held", 0)) + 1
+            if held >= int(params.get("max_hold", 36)):
+                await self._close(
+                    paper_id, pair, pos, bar, float(bar["c"]), "max_hold"
+                )
+                return True
+            return False
+
         low, high = float(bar["l"]), float(bar["h"])
         stop, target = float(pos["stop_price"]), float(pos["target_price"])
         if direction > 0 and low <= stop:
@@ -535,8 +796,6 @@ class PaperTradingEngine:
             await self._close(paper_id, pair, pos, bar, target, "target")
             return True
 
-        # Same conservative rule as the backtest: a stop improvement earned
-        # within this candle becomes active on the next candle.
         self._maybe_protect_stop(pos, bar, params)
 
         held = int(pos.get("bars_held", 0)) + 1
