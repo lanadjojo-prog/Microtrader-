@@ -99,6 +99,9 @@ class PrecisionStrategyLab:
         if self._bars and self._ticks:
             return self._bars, self._ticks
         self.state.stage = "loading_data"
+        self.state.pairs_loaded = 0
+        self.state.bars_loaded = 0
+        self.state.quote_ticks_loaded = 0
         bars_by_pair: Dict[str, List[dict]] = {}
         ticks_by_pair: Dict[str, List[QuoteTick]] = {}
         use_ctrader = self.settings.precision_data_provider == "ctrader"
@@ -106,8 +109,11 @@ class PrecisionStrategyLab:
             await self.client.connect_and_authenticate()
         for pair in self.settings.precision_pairs:
             self.state.current_pair = pair
+            self.state.message = f"Precision: {pair} 1m-bars laden..."
             if use_ctrader:
                 bars = await self.client.historical_bars(pair, timeframe_min=1, max_bars=self.settings.precision_max_bars_per_pair, lookback_days=self.settings.precision_lookback_days)
+                self.state.bars_loaded += len(bars)
+                self.state.message = f"Precision: {pair} bid/ask ticks laden ({len(bars)} bars klaar)..."
                 ticks = await self.client.historical_quote_ticks(pair, lookback_days=self.settings.precision_lookback_days, max_ticks_per_side=self.settings.precision_max_ticks_per_side)
             else:
                 bars = await self.external_data.historical_bars(pair, max_bars=self.settings.precision_max_bars_per_pair, lookback_days=self.settings.precision_lookback_days)
@@ -127,8 +133,10 @@ class PrecisionStrategyLab:
                 continue
             bars_by_pair[pair], ticks_by_pair[pair] = aligned, ticks
             self.state.pairs_loaded = len(bars_by_pair)
-            self.state.bars_loaded += len(aligned)
+            if not use_ctrader:
+                self.state.bars_loaded += len(aligned)
             self.state.quote_ticks_loaded += len(ticks)
+            self.state.message = f"Precision: {pair} data klaar · {len(aligned)} bars · {len(ticks)} quotes"
         self.state.current_pair = ""
         if not bars_by_pair:
             raise RuntimeError("No precision research data available")
@@ -202,18 +210,20 @@ class PrecisionStrategyLab:
                     bars, ticks = {}, {}
                     continue
 
+                batch_size = max(1, self.settings.precision_batch_size)
+                batch = remaining[:batch_size]
                 self.state.generation += 1
                 self.state.stage = "testing"
-                self.state.total = len(remaining)
+                self.state.total = len(batch)
                 self.state.progress = 0
-                for idx, candidate in enumerate(remaining, 1):
+                for idx, candidate in enumerate(batch, 1):
                     if not self.state.running:
                         break
                     self.state.progress = idx
                     self.state.current_candidate = candidate.strategy
                     self.state.current_params = dict(candidate.params)
                     self.state.message = (
-                        f"Precision {idx}/{len(remaining)} · {candidate.strategy} · "
+                        f"Precision {idx}/{len(batch)} · {candidate.strategy} · "
                         f"{candidate.params['stop_pips']}p/{candidate.params['target_pips']}p · "
                         f"EUR {candidate.params['risk_eur']} risk"
                     )
