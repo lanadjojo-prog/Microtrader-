@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 from config import Settings
 from ctrader_client import CTraderClient
 from forex_store import ForexStrategyStore
+from forex_backtest import FOREX_EVALUATION_POLICY_VERSION
 from paper_store import PaperTradingStore
 from market_filters import entry_allowed
 
@@ -136,7 +137,11 @@ class PaperTradingEngine:
         payload = asdict(self.state)
         payload["start_balance_eur"] = self.settings.paper_start_balance
         payload["poll_seconds"] = self.settings.paper_poll_seconds
-        payload["execution"] = "simulated-only; no broker orders"
+        payload["execution"] = (
+            "simulated-only; causal close execution; signals use only completed bars; "
+            "no broker orders"
+        )
+        payload["entry_timing"] = "signal at completed-bar close; fill at that observable close; management starts next bar"
         payload["allowed_timeframes_min"] = [1, 5]
         payload["entry_sessions"] = ["London", "New York"]
         payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
@@ -180,6 +185,7 @@ class PaperTradingEngine:
         promoted = await self.research_store.load_promoted(
             limit=100,
             min_trades_per_day=self.settings.strategy_min_trades_per_day,
+            evaluation_policy_version=FOREX_EVALUATION_POLICY_VERSION,
         )
         eligible_ids: set[str] = set()
         portfolio_sources: set[str] = set()
@@ -367,9 +373,17 @@ class PaperTradingEngine:
                         await self.store.upsert_position(paper_id, pair, pos)
                         positions[pair] = pos
                 elif allow_entries:
+                    # Paper execution must be causal. At this point the bar has
+                    # just become fully closed, so its close/volume are observable
+                    # but its historical open can no longer be filled.
+                    entry_time = _dt(bar["t"]) + timedelta(minutes=tf)
+                    decision_bar = dict(bar)
+                    decision_bar["t"] = entry_time.isoformat()
+                    decision_bars = closed[: i + 1] + [decision_bar]
+                    decision_idx = len(decision_bars) - 1
                     allowed, session_name, volume_ratio = entry_allowed(
-                        closed,
-                        i,
+                        decision_bars,
+                        decision_idx,
                         min_volume_ratio=float(
                             params.get("min_volume_ratio", self.settings.strategy_min_volume_ratio)
                         ),
@@ -377,12 +391,14 @@ class PaperTradingEngine:
                             params.get("volume_window", self.settings.strategy_volume_window)
                         ),
                     )
-                    direction = _signal(strategy, params, closed, i) if allowed else 0
+                    # Evaluate the signal at the completed-bar close. i+1 means
+                    # the just-closed bar is included, with no next-bar lookahead.
+                    direction = _signal(strategy, params, closed, i + 1) if allowed else 0
                     if direction:
-                        atr = _atr(closed, i, 14)
+                        atr = _atr(closed, i + 1, 14)
                         risk_distance = atr * float(params.get("stop_atr", 1.0))
                         if risk_distance > 0:
-                            entry = float(bar["o"])
+                            entry = float(bar["c"])
                             target_r = float(params.get("target_r", 2.0))
                             risk_eur = float(params.get("risk_eur", 2.0))
                             if direction > 0:
@@ -393,7 +409,7 @@ class PaperTradingEngine:
                                 target = entry - risk_distance * target_r
                             new_pos = {
                                 "direction": direction,
-                                "entry_time": str(bar["t"]),
+                                "entry_time": entry_time.isoformat(),
                                 "entry_price": entry,
                                 "risk_distance": risk_distance,
                                 "stop_price": stop,
@@ -402,15 +418,14 @@ class PaperTradingEngine:
                                 "risk_eur": risk_eur,
                                 "entry_session": session_name,
                                 "entry_volume_ratio": volume_ratio,
+                                "execution_timing": "completed_bar_close",
                             }
-                            immediate = await self._manage_entry_bar(
-                                paper_id, pair, new_pos, bar, params
+                            # The position did not exist during this finished bar.
+                            # Stop/target management starts with the next bar.
+                            await self.store.upsert_position(
+                                paper_id, pair, new_pos
                             )
-                            if not immediate:
-                                await self.store.upsert_position(
-                                    paper_id, pair, new_pos
-                                )
-                                positions[pair] = new_pos
+                            positions[pair] = new_pos
 
                 await self.store.set_cursor(paper_id, pair, str(bar["t"]))
                 cursors[pair] = str(bar["t"])
