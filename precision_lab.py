@@ -38,7 +38,9 @@ def apply_frequency_gate(results: List[dict], min_trades_per_day: float) -> List
         oos = dict(item.get("oos") or {})
         observed = float(oos.get("avg_trades_per_day") or 0.0)
         status = str(item.get("status") or item.get("funnel_stage") or "")
-        if observed < threshold and status in {"precision_incubator", "precision_deep_search"}:
+        if observed < threshold and status in {
+            "precision_incubator", "precision_qualified", "precision_deep_search"
+        }:
             item["status"] = "rejected"
             item["funnel_stage"] = "rejected"
             reasons = list(item.get("rejection_reasons") or [])
@@ -109,6 +111,11 @@ class PrecisionStrategyLab:
             "entry_sessions": ["London", "New York"],
             "min_volume_ratio": self.settings.strategy_min_volume_ratio,
             "tick_execution": True,
+            "qualified_total": self.state.deep_search_total,
+            "stage_semantics": (
+                "precision_qualified = passed current chronological bid/ask tick "
+                "validation; not a separate Deep Search phase"
+            ),
             "results_loaded": len(self._results),
         })
         return payload
@@ -197,7 +204,7 @@ class PrecisionStrategyLab:
             )
             self.state.deep_search_total = sum(
                 1 for row in self._results
-                if str(row.get("status") or row.get("funnel_stage") or "") == "precision_deep_search"
+                if str(row.get("status") or row.get("funnel_stage") or "") == "precision_qualified"
             )
 
             bars: Dict[str, List[dict]] = {}
@@ -313,7 +320,7 @@ class PrecisionStrategyLab:
                     if run_id:
                         clean["run_id"] = run_id
                     self.state.tested_total += 1
-                    if clean.get("funnel_stage") == "precision_deep_search":
+                    if clean.get("funnel_stage") == "precision_qualified":
                         self.state.deep_search_total += 1
                     self.state.last_completed_candidate = candidate.strategy
                     self.state.last_completed_at = datetime.now(timezone.utc).isoformat()
