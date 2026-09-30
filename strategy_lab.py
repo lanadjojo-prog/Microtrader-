@@ -215,6 +215,13 @@ class StrategyLab:
 
             await self.store.init()
             persisted = await self.store.load_results(limit=250)
+            # Old runs remain in the database for audit/history, but they must
+            # never re-enter the active funnel after the policy change.
+            persisted = [
+                row for row in persisted
+                if int((row.get("params") or {}).get("timeframe_min") or 0) in (1, 5)
+                and str((row.get("params") or {}).get("entry_sessions") or "") == "london_new_york"
+            ]
             persisted_signatures = await self.store.load_signatures()
             persisted_state = await self.store.load_state()
 
