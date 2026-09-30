@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import lzma
 import logging
 import struct
@@ -49,6 +50,7 @@ class ExternalForexData:
         )
         self._bars_cache: Dict[tuple, List[dict]] = {}
         self._ticks_cache: Dict[tuple, List[QuoteTick]] = {}
+        self._dukascopy_day_cache: Dict[tuple, List[QuoteTick]] = {}
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -210,13 +212,10 @@ class ExternalForexData:
             day = today - timedelta(days=offset)
             if day.weekday() >= 5:
                 continue
-            blob = await self._dukascopy_day(pair, day)
-            if not blob:
+            day_ticks = await self._dukascopy_day_ticks(pair, day)
+            if not day_ticks:
                 continue
-            ticks = decode_dukascopy_ticks(blob, pair, day)
-            if not ticks:
-                continue
-            collected.extend(bars_from_quote_ticks(ticks))
+            collected.extend(bars_from_quote_ticks(day_ticks))
             if len(collected) >= max_bars + 1500:
                 break
         return sorted(collected, key=lambda row: str(row.get("t") or ""))[-max_bars:]
@@ -234,10 +233,7 @@ class ExternalForexData:
             day = today - timedelta(days=offset)
             if day.weekday() >= 5:
                 continue
-            blob = await self._dukascopy_day(pair, day)
-            if not blob:
-                continue
-            day_ticks = decode_dukascopy_ticks(blob, pair, day)
+            day_ticks = await self._dukascopy_day_ticks(pair, day)
             if day_ticks:
                 collected.extend(day_ticks)
             if len(collected) >= max_ticks:
@@ -245,10 +241,41 @@ class ExternalForexData:
         collected.sort(key=lambda item: item[0])
         return collected[-max_ticks:]
 
-    async def _dukascopy_day(self, pair: str, day: date) -> bytes:
+    async def _dukascopy_day_ticks(self, pair: str, day: date) -> List[QuoteTick]:
+        key = (pair.upper(), day.isoformat())
+        if key in self._dukascopy_day_cache:
+            return list(self._dukascopy_day_cache[key])
+
+        # Dukascopy tick history is stored in 24 hourly files, not one daily file:
+        # .../{PAIR}/{year}/{zero_based_month}/{day}/{hour}h_ticks.bi5
+        # Fetch a day with bounded concurrency so Precision can build a coherent
+        # bid/ask stream without hammering the source.
+        semaphore = asyncio.Semaphore(6)
+
+        async def load_hour(hour: int) -> List[QuoteTick]:
+            async with semaphore:
+                blob = await self._dukascopy_hour(pair, day, hour)
+            if not blob:
+                return []
+            return decode_dukascopy_ticks(blob, pair, day, hour)
+
+        chunks = await asyncio.gather(*(load_hour(hour) for hour in range(24)))
+        ticks = [tick for chunk in chunks for tick in chunk]
+        ticks.sort(key=lambda item: item[0])
+        self._dukascopy_day_cache[key] = list(ticks)
+        # Keep the tiny in-memory cache bounded on long-running workers.
+        if len(self._dukascopy_day_cache) > 20:
+            first_key = next(iter(self._dukascopy_day_cache))
+            self._dukascopy_day_cache.pop(first_key, None)
+        return ticks
+
+    async def _dukascopy_hour(self, pair: str, day: date, hour: int) -> bytes:
         instrument = pair.replace("/", "").upper()
         month_zero_based = day.month - 1
-        relative = f"{instrument}/{day.year}/{month_zero_based:02d}/{day.day:02d}_ticks.bi5"
+        relative = (
+            f"{instrument}/{day.year}/{month_zero_based:02d}/"
+            f"{day.day:02d}/{int(hour):02d}h_ticks.bi5"
+        )
         last_error = ""
         for base in self.settings.dukascopy_base_urls:
             url = base.rstrip("/") + "/" + relative
@@ -269,7 +296,7 @@ class ExternalForexData:
         return b""
 
 
-def decode_dukascopy_ticks(blob: bytes, pair: str, day: date) -> List[QuoteTick]:
+def decode_dukascopy_ticks(blob: bytes, pair: str, day: date, hour: int = 0) -> List[QuoteTick]:
     try:
         raw = lzma.decompress(blob)
     except lzma.LZMAError as exc:
@@ -280,7 +307,7 @@ def decode_dukascopy_ticks(blob: bytes, pair: str, day: date) -> List[QuoteTick]
         return []
     usable = len(raw) - (len(raw) % record_size)
     scale = 1000.0 if pair.upper().endswith("/JPY") or pair.upper().endswith("JPY") else 100000.0
-    day_start_ms = int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() * 1000)
+    hour_start_ms = int(datetime(day.year, day.month, day.day, int(hour), tzinfo=timezone.utc).timestamp() * 1000)
     out: List[QuoteTick] = []
     for offset in range(0, usable, record_size):
         ms, ask_i, bid_i, _ask_vol, _bid_vol = struct.unpack(">IIIff", raw[offset:offset + record_size])
@@ -288,7 +315,7 @@ def decode_dukascopy_ticks(blob: bytes, pair: str, day: date) -> List[QuoteTick]
         bid = bid_i / scale
         if ask <= 0 or bid <= 0:
             continue
-        out.append((day_start_ms + int(ms), bid, ask))
+        out.append((hour_start_ms + int(ms), bid, ask))
     return out
 
 
