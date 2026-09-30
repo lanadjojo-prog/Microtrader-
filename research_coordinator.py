@@ -48,10 +48,19 @@ class ResearchCoordinator:
     async def start(self):
         if self.state.running:
             return
+        try:
+            await self.research.store.init()
+            self._seen_validations = await self.research.store.load_validated_signatures()
+        except Exception as exc:
+            log.warning("Could not restore validation history: %s", exc)
         self.state = CoordinatorState(
             running=True,
             mode="discovery",
-            message="Forex discovery has CPU priority; validation is queued only for promising candidates.",
+            message=(
+                "Forex discovery has CPU priority; exact frozen candidates are "
+                "validated once and validation history survives restarts."
+            ),
+            validations_completed=len(self._seen_validations),
         )
         self._task = asyncio.create_task(self._run(), name="microtrader-research-coordinator")
 
@@ -97,32 +106,69 @@ class ResearchCoordinator:
         self.state.queued_strategy = str(row.get("strategy") or "")
         self.state.queued_stage = str(row.get("funnel_stage") or "")
         self.state.message = (
-            f"Pausing forex discovery to run full research validation on "
-            f"{self.state.queued_strategy} ({self.state.queued_stage})."
+            f"Pausing forex discovery to validate the exact frozen "
+            f"{self.state.queued_strategy} configuration."
         )
-        log.info("Coordinator validation start: strategy=%s stage=%s signature=%s",
-                 self.state.queued_strategy, self.state.queued_stage, sig[:12])
+        log.info(
+            "Coordinator validation start: strategy=%s stage=%s signature=%s",
+            self.state.queued_strategy,
+            self.state.queued_stage,
+            sig[:12],
+        )
         await self.lab.pause(self.state.message)
         self.state.validations_started += 1
+        candidate = Candidate(
+            self.state.queued_strategy,
+            dict(row.get("params") or {}),
+        )
         try:
             if self.research.state.running:
                 await self.research.stop()
-            await self.research.start()
+            await self.research.start(candidate=candidate)
 
-            # Research Labs already run their own 17-stage sequence.
             while self.research.state.running and self.state.running:
                 await asyncio.sleep(2)
 
             if self.research.state.last_error:
                 raise RuntimeError(self.research.state.last_error)
 
+            summary = {
+                "completed_labs": self.research.state.completed_labs,
+                "total_labs": self.research.state.total_labs,
+                "master": (self.research.public_state().get("labs") or {}).get("master"),
+            }
+            await self.research.store.save_validation(
+                candidate_signature=sig,
+                strategy=candidate.strategy,
+                params=candidate.params,
+                status="completed",
+                summary=summary,
+            )
             self._seen_validations.add(sig)
-            self.state.validations_completed += 1
+            self.state.validations_completed = len(self._seen_validations)
             self.state.last_validation_signature = sig
             self.state.last_validation_at = datetime.now(timezone.utc).isoformat()
             self.state.message = "Validation completed; forex discovery resumed."
-            log.info("Coordinator validation complete: strategy=%s signature=%s",
-                     self.state.queued_strategy, sig[:12])
+            log.info(
+                "Coordinator validation complete: strategy=%s signature=%s",
+                self.state.queued_strategy,
+                sig[:12],
+            )
+        except Exception as exc:
+            try:
+                await self.research.store.save_validation(
+                    candidate_signature=sig,
+                    strategy=candidate.strategy,
+                    params=candidate.params,
+                    status="failed",
+                    summary={"error": str(exc)},
+                )
+            except Exception:
+                pass
+            # Do not retry the same broken validation every ten seconds in the
+            # same process. A restart can retry it after code/data changes.
+            self._seen_validations.add(sig)
+            raise
         finally:
             await self.lab.resume()
             log.info("Coordinator resumed Strategy Lab")
