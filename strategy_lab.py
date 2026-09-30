@@ -218,7 +218,10 @@ class StrategyLab:
                 raise RuntimeError("No usable cTrader forex bars returned for Research Lab")
 
             await self.store.init()
-            persisted = await self.store.load_results(limit=250)
+            persisted = await self.store.load_research_memory(
+                per_family_stage=40,
+                limit=RESEARCH_MEMORY_LIMIT,
+            )
             # Old runs remain in the database for audit/history, but they must
             # never re-enter the active funnel after the policy change.
             persisted = [
@@ -228,6 +231,7 @@ class StrategyLab:
                 and str((row.get("params") or {}).get("market") or "") == "forex"
                 and str((row.get("params") or {}).get("data_source") or "") == "ctrader"
                 and str((row.get("params") or {}).get("direction_mode") or "") == "long_short"
+                and str((row.get("params") or {}).get("_policy_version") or "") == RESEARCH_POLICY_VERSION
             ]
             persisted_signatures = await self.store.load_signatures()
             persisted_state = await self.store.load_state()
@@ -288,15 +292,20 @@ class StrategyLab:
                     # Incubator gets more history, Deep Search must confirm on the
                     # full configured dataset before promotion is possible.
                     phase_bar_budget = {
-                        "discovery": min(5000, self.settings.forex_max_bars_per_pair),
-                        "incubator": min(10000, self.settings.forex_max_bars_per_pair),
+                        "discovery": min(DISCOVERY_SOURCE_BARS, self.settings.forex_max_bars_per_pair),
+                        "incubator": min(INCUBATOR_SOURCE_BARS, self.settings.forex_max_bars_per_pair),
                         "deep_search": self.settings.forex_max_bars_per_pair,
                     }.get(candidate_phase, self.settings.forex_max_bars_per_pair)
                     tf = int(candidate.params.get("timeframe_min", 1))
-                    candidate_bars = {
-                        s: aggregate_bars(v[-phase_bar_budget:], tf)
-                        for s, v in bars_by_symbol.items()
-                    }
+                    candidate_bars: Dict[str, List[dict]] = {}
+                    for s, raw_bars in bars_by_symbol.items():
+                        if candidate_phase == "deep_search":
+                            selected = raw_bars
+                        else:
+                            holdout_start = max(2, int(len(raw_bars) * (1.0 - FINAL_HOLDOUT_FRACTION)))
+                            pre_holdout = raw_bars[:holdout_start]
+                            selected = pre_holdout[-phase_bar_budget:]
+                        candidate_bars[s] = aggregate_bars(selected, tf)
 
                     self.state.current_candidate = candidate.strategy
                     self.state.current_params = dict(candidate.params)
@@ -349,6 +358,11 @@ class StrategyLab:
                         (result.get("oos") or {}).get("expectancy_bps")
                     )
                     results.append(result)
+                    results = prune_research_results(
+                        results,
+                        limit=RESEARCH_MEMORY_LIMIT,
+                        per_family_stage=80,
+                    )
                     signature = candidate_signature(candidate)
                     if result["promoted"]:
                         promoted.append(result)
@@ -372,7 +386,11 @@ class StrategyLab:
                         ),
                         reverse=True,
                     )
-                    self._results = results[:250]
+                    self._results = prune_research_results(
+                        results,
+                        limit=DASHBOARD_RESULT_LIMIT,
+                        per_family_stage=30,
+                    )
 
                     # Queue persistence instead of awaiting the database. A slow
                     # Supabase pooler must never pause strategy discovery.
@@ -456,7 +474,13 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
-RESEARCH_POLICY_VERSION = "forex-ctrader-v2-long-short-frequency-v2-min3-preferred5-target10-portfolio10"
+RESEARCH_POLICY_VERSION = "forex-ctrader-v3-frozen-deep-holdout20-aligned-bars"
+FINAL_HOLDOUT_FRACTION = 0.20
+DISCOVERY_SOURCE_BARS = 10000
+INCUBATOR_SOURCE_BARS = 20000
+RESEARCH_MEMORY_LIMIT = 1000
+DASHBOARD_RESULT_LIMIT = 250
+MIN_DEEP_OOS_DAYS = 3
 
 def candidate_signature(candidate: Candidate) -> str:
     import json
@@ -470,7 +494,7 @@ def candidate_signature(candidate: Candidate) -> str:
 def discovery_candidates() -> List[Candidate]:
     out: List[Candidate] = []
     for tf in (1, 5):
-        common = {"timeframe_min": tf, "_phase": "discovery", "market": "forex", "data_source": "ctrader", "direction_mode": "long_short", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50}
+        common = {"timeframe_min": tf, "_phase": "discovery", "_policy_version": RESEARCH_POLICY_VERSION, "market": "forex", "data_source": "ctrader", "direction_mode": "long_short", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50}
         out.extend([
             Candidate("momentum", {**common, "fast": 4, "slow": 16, "entry_bps": 8.0, "max_hold": 16}),
             Candidate("mean_reversion", {**common, "window": 20, "z_entry": 1.5, "z_exit": 0.25, "max_hold": 20}),
@@ -541,6 +565,51 @@ def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candi
             out.append(Candidate(strategy, q))
     return out
 
+def _candidate_priority(candidate: Candidate, focus_families: set[str], focus_timeframes: set[int]) -> tuple:
+    return (
+        1 if candidate.strategy in focus_families else 0,
+        1 if int(candidate.params.get("timeframe_min", 0)) in focus_timeframes else 0,
+    )
+
+
+def _round_robin_candidates(
+    candidates: List[Candidate],
+    *,
+    batch_size: int,
+    focus_families: set[str],
+    focus_timeframes: set[int],
+) -> List[Candidate]:
+    groups: Dict[str, List[Candidate]] = {}
+    for candidate in candidates:
+        groups.setdefault(candidate.strategy, []).append(candidate)
+    family_order = sorted(
+        groups,
+        key=lambda family: (
+            1 if family in focus_families else 0,
+            max(
+                (
+                    1
+                    if int(c.params.get("timeframe_min", 0)) in focus_timeframes
+                    else 0
+                )
+                for c in groups[family]
+            ),
+            family,
+        ),
+        reverse=True,
+    )
+    out: List[Candidate] = []
+    while family_order and len(out) < batch_size:
+        next_round: List[str] = []
+        for family in family_order:
+            if groups[family] and len(out) < batch_size:
+                out.append(groups[family].pop(0))
+            if groups[family]:
+                next_round.append(family)
+        family_order = next_round
+    return out
+
+
 def choose_batch(
     results: List[dict],
     seen: set[str],
@@ -550,63 +619,103 @@ def choose_batch(
 ) -> List[Candidate]:
     focus = focus or {}
     focus_families = set(focus.get("families") or [])
-    focus_timeframes = set(int(x) for x in (focus.get("timeframes") or []))
+    focus_timeframes = {
+        int(x) for x in (focus.get("timeframes") or []) if int(x) in {1, 5}
+    }
+
     pending_discovery = [
-        c for c in discovery_candidates()
-        if candidate_signature(c) not in seen
+        candidate for candidate in discovery_candidates()
+        if candidate_signature(candidate) not in seen
     ]
-    pending_discovery.sort(
-        key=lambda c: (
-            c.strategy in focus_families if focus_families else False,
-            int(c.params.get("timeframe_min", 0)) in focus_timeframes if focus_timeframes else False,
-        ),
-        reverse=True,
-    )
     if pending_discovery:
-        return pending_discovery[:batch_size]
+        pending_discovery.sort(
+            key=lambda candidate: _candidate_priority(
+                candidate, focus_families, focus_timeframes
+            ),
+            reverse=True,
+        )
+        return _round_robin_candidates(
+            pending_discovery,
+            batch_size=batch_size,
+            focus_families=focus_families,
+            focus_timeframes=focus_timeframes,
+        )
 
-    promising = [
-        r for r in results
-        if r.get("funnel_stage") in {"incubator", "deep_search", "promoted"}
-        and r.get("params", {}).get("_phase") in {"discovery", "incubator", "deep_search"}
+    # A configuration that passed Incubator is frozen before Deep Search.
+    # Deep Search never mutates parameters: it is the final holdout test.
+    frozen_deep: List[Candidate] = []
+    for row in results:
+        params = dict(row.get("params") or {})
+        if (
+            row.get("funnel_stage") == "deep_search"
+            and params.get("_phase") == "incubator"
+        ):
+            params["_phase"] = "deep_search"
+            candidate = Candidate(str(row.get("strategy") or ""), params)
+            if candidate.strategy and candidate_signature(candidate) not in seen:
+                frozen_deep.append(candidate)
+    if frozen_deep:
+        frozen_deep.sort(
+            key=lambda candidate: _candidate_priority(
+                candidate, focus_families, focus_timeframes
+            ),
+            reverse=True,
+        )
+        return _round_robin_candidates(
+            frozen_deep,
+            batch_size=batch_size,
+            focus_families=focus_families,
+            focus_timeframes=focus_timeframes,
+        )
+
+    # Only Discovery winners are locally varied in Incubator.
+    parents = [
+        row for row in results
+        if row.get("funnel_stage") == "incubator"
+        and (row.get("params") or {}).get("_phase") == "discovery"
     ]
-    promising.sort(
-        key=lambda r: (
-            r.get("strategy") in focus_families if focus_families else False,
-            int((r.get("params") or {}).get("timeframe_min", 0)) in focus_timeframes if focus_timeframes else False,
-            float(r.get("funnel_score") or 0),
+    parents.sort(
+        key=lambda row: (
+            1 if row.get("strategy") in focus_families else 0,
+            1 if int((row.get("params") or {}).get("timeframe_min", 0)) in focus_timeframes else 0,
+            float(row.get("funnel_score") or 0),
         ),
         reverse=True,
     )
-
-    phase = "deep_search" if any(
-        r.get("params", {}).get("_phase") in {"incubator", "deep_search"}
-        or r.get("funnel_stage") == "deep_search"
-        for r in promising[:12]
-    ) else "incubator"
-    candidates: List[Candidate] = []
-    for row in promising[:12]:
-        candidates.extend(parameter_variants(row, phase, generation))
-
-    unique = []
-    local = set()
-    for cand in candidates:
-        sig = candidate_signature(cand)
-        if sig in seen or sig in local:
+    # Keep several parents per family, not just the global top rows.
+    parent_counts: Dict[str, int] = {}
+    incubator: List[Candidate] = []
+    for row in parents:
+        family = str(row.get("strategy") or "")
+        if parent_counts.get(family, 0) >= 3:
             continue
-        local.add(sig)
-        unique.append(cand)
-        if len(unique) >= batch_size:
-            return unique
+        parent_counts[family] = parent_counts.get(family, 0) + 1
+        incubator.extend(parameter_variants(row, "incubator", generation))
 
-    # If nothing has shown promise, keep broadening Discovery. The previous
-    # version clamped this at generation 6, which eventually exhausted every
-    # signature and made the lab stop around ~760 tests.
+    local_seen: set[str] = set()
+    incubator = [
+        candidate for candidate in incubator
+        if candidate_signature(candidate) not in seen
+        and not (
+            candidate_signature(candidate) in local_seen
+            or local_seen.add(candidate_signature(candidate))
+        )
+    ]
+    if incubator:
+        return _round_robin_candidates(
+            incubator,
+            batch_size=batch_size,
+            focus_families=focus_families,
+            focus_timeframes=focus_timeframes,
+        )
+
+    # No promising parent left: broaden Discovery deterministically.
     g = max(1, generation)
     epoch = max(0, (g - 1) // 6)
     wave = 1 + ((g - 1) % 6)
+    broad: List[Candidate] = []
     for tf in (1, 5):
-        broad = [
+        templates = [
             Candidate("momentum", {"timeframe_min": tf, "_phase": "discovery",
                 "fast": 2 + (wave % 5), "slow": 10 + 3*wave + 2*epoch,
                 "entry_bps": round(3.0 + 1.5*wave + 0.25*epoch, 2), "max_hold": 8 + 3*wave + epoch}),
@@ -625,21 +734,70 @@ def choose_batch(
             Candidate("trend_pullback", {"timeframe_min": tf, "_phase": "discovery",
                 "fast": 4 + wave, "slow": 20 + 4*wave + 2*epoch,
                 "pullback_z": round(0.6 + 0.12*wave + 0.02*epoch, 2), "max_hold": 12 + 3*wave + epoch}),
+            Candidate("vwap_reversion", {"timeframe_min": tf, "_phase": "discovery",
+                "window": 30 + 5*wave + 2*epoch, "z_entry": round(0.9 + 0.12*wave + 0.02*epoch, 2),
+                "max_hold": 10 + 3*wave + epoch}),
+            Candidate("vwap_momentum", {"timeframe_min": tf, "_phase": "discovery",
+                "window": 30 + 5*wave + 2*epoch, "buffer_bps": round(3.0 + wave + 0.2*epoch, 2),
+                "max_hold": 10 + 3*wave + epoch}),
             Candidate("asymmetric_breakout", {"timeframe_min": tf, "_phase": "discovery",
                 "window": 15 + 5*wave + 2*epoch, "stop_atr": round(0.4 + 0.05*wave + 0.01*epoch, 2),
                 "target_r": float((3, 5, 8, 10, 12, 15)[(wave - 1) % 6]),
                 "max_hold": 30 + 5*wave + 2*epoch}),
         ]
-        for cand in broad:
-            cand = Candidate(cand.strategy, {**cand.params, "market": "forex", "data_source": "ctrader", "direction_mode": "long_short", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50})
-            sig = candidate_signature(cand)
-            if sig not in seen and sig not in local:
-                local.add(sig)
-                unique.append(cand)
-                if len(unique) >= batch_size:
-                    return unique
-    return unique
+        for candidate in templates:
+            candidate = Candidate(candidate.strategy, {
+                **candidate.params,
+                "_policy_version": RESEARCH_POLICY_VERSION,
+                "market": "forex",
+                "data_source": "ctrader",
+                "direction_mode": "long_short",
+                "entry_sessions": "london_new_york",
+                "min_volume_ratio": 0.70,
+                "volume_window": 50,
+            })
+            if candidate_signature(candidate) not in seen:
+                broad.append(candidate)
+    return _round_robin_candidates(
+        broad,
+        batch_size=batch_size,
+        focus_families=focus_families,
+        focus_timeframes=focus_timeframes,
+    )
 
+
+def prune_research_results(
+    rows: List[dict],
+    *,
+    limit: int,
+    per_family_stage: int,
+) -> List[dict]:
+    """Keep a bounded, diverse in-memory research set."""
+    stage_rank = {"promoted": 4, "deep_search": 3, "incubator": 2, "rejected": 1}
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            stage_rank.get(str(row.get("funnel_stage") or "rejected"), 0),
+            float(row.get("funnel_score") or 0),
+            float((row.get("oos") or {}).get("expectancy_bps") or 0),
+        ),
+        reverse=True,
+    )
+    counts: Dict[tuple[str, str], int] = {}
+    kept: List[dict] = []
+    for row in ordered:
+        key = (
+            str(row.get("family") or row.get("strategy") or "unknown"),
+            str(row.get("funnel_stage") or "rejected"),
+        )
+        cap = limit if bool(row.get("promoted")) else per_family_stage
+        if counts.get(key, 0) >= cap:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        kept.append(row)
+        if len(kept) >= limit:
+            break
+    return kept
 
 def candidate_stream():
     for c in discovery_candidates():
@@ -653,23 +811,33 @@ def candidate_grid() -> List[Candidate]:
 def aggregate_bars(bars: List[dict], minutes: int) -> List[dict]:
     if minutes <= 1:
         return list(bars)
-    out: List[dict] = []
-    bucket: List[dict] = []
+
+    buckets: Dict[str, List[dict]] = {}
     for bar in bars:
-        bucket.append(bar)
-        if len(bucket) < minutes:
+        raw = str(bar.get("t") or "")
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        minute = (dt.minute // minutes) * minutes
+        key_dt = dt.replace(minute=minute, second=0, microsecond=0)
+        key = key_dt.isoformat()
+        buckets.setdefault(key, []).append(bar)
+
+    out: List[dict] = []
+    for key in sorted(buckets):
+        group = buckets[key]
+        if not group:
             continue
         out.append({
-            "t": bucket[-1].get("t"),
-            "o": float(bucket[0]["o"]),
-            "h": max(float(x["h"]) for x in bucket),
-            "l": min(float(x["l"]) for x in bucket),
-            "c": float(bucket[-1]["c"]),
-            "v": sum(float(x.get("v") or 0) for x in bucket),
+            "t": key,
+            "o": float(group[0]["o"]),
+            "h": max(float(x["h"]) for x in group),
+            "l": min(float(x["l"]) for x in group),
+            "c": float(group[-1]["c"]),
+            "v": sum(float(x.get("v") or 0) for x in group),
         })
-        bucket = []
     return out
-
 
 def evaluate_candidate(
     candidate: Candidate,
@@ -692,11 +860,17 @@ def evaluate_candidate(
     train_days: set[str] = set()
     oos_days: set[str] = set()
 
+    candidate_phase = str(candidate.params.get("_phase", "discovery"))
     symbol_items = list(bars_by_symbol.items())
     for symbol_index, (symbol, bars) in enumerate(symbol_items, start=1):
         if progress_callback:
             progress_callback(symbol_index, len(symbol_items), symbol)
-        split = max(2, int(len(bars) * 0.70))
+        split_fraction = (
+            1.0 - FINAL_HOLDOUT_FRACTION
+            if candidate_phase == "deep_search"
+            else 0.70
+        )
+        split = max(2, int(len(bars) * split_fraction))
         train = bars[:split]
         test = bars[split:]
         train_days.update(str(x.get("t") or "")[:10] for x in train if x.get("t"))
@@ -745,11 +919,13 @@ def evaluate_candidate(
     if stress_metrics["expectancy_bps"] <= 0:
         reasons.append("fails stressed transaction-cost test")
 
+    deep_oos_days = int(oos_metrics.get("trading_days") or 0)
+    if candidate_phase == "deep_search" and deep_oos_days < MIN_DEEP_OOS_DAYS:
+        reasons.append(
+            f"final holdout has fewer than {MIN_DEEP_OOS_DAYS} trading days"
+        )
+
     raw_pass = not reasons
-    candidate_phase = str(candidate.params.get("_phase", "discovery"))
-    promoted = raw_pass and candidate_phase == "deep_search"
-    if raw_pass and not promoted:
-        reasons.append("passes current filters; requires deep-search full-history confirmation")
     score = funnel_score(
         oos_metrics,
         stress_metrics,
@@ -758,26 +934,37 @@ def evaluate_candidate(
         preferred_trades_per_day,
         target_trades_per_day,
     )
-    if not hard_frequency_pass:
-        funnel_stage = "rejected"
-    elif promoted:
-        funnel_stage = "promoted"
-    elif raw_pass or (
-        oos_metrics["trades"] >= max(20, min_oos_trades // 2)
+    discovery_ok = (
+        hard_frequency_pass
+        and oos_metrics["trades"] >= 15
+        and (
+            oos_metrics["expectancy_bps"] > 0
+            or oos_metrics["profit_factor"] >= 1.05
+        )
+        and oos_metrics["max_drawdown_pct"] <= 12.0
+    )
+    incubator_ok = (
+        hard_frequency_pass
+        and oos_metrics["trades"] >= max(20, min_oos_trades // 2)
         and oos_metrics["expectancy_bps"] > 0
         and oos_metrics["profit_factor"] >= 1.20
         and stress_metrics["expectancy_bps"] > -1.0
         and positive_symbol_ratio >= 0.40
-    ):
-        funnel_stage = "deep_search"
-    elif (
-        oos_metrics["trades"] >= 15
-        and (oos_metrics["expectancy_bps"] > 0 or oos_metrics["profit_factor"] >= 1.05)
-        and oos_metrics["max_drawdown_pct"] <= 12.0
-    ):
-        funnel_stage = "incubator"
+    )
+
+    if candidate_phase == "deep_search":
+        promoted = raw_pass
+        funnel_stage = "promoted" if promoted else "rejected"
+    elif candidate_phase == "incubator":
+        promoted = False
+        funnel_stage = "deep_search" if (raw_pass or incubator_ok) else "rejected"
+        if funnel_stage == "deep_search" and raw_pass:
+            reasons.append("incubator passed; exact parameters frozen for final holdout")
     else:
-        funnel_stage = "rejected"
+        promoted = False
+        funnel_stage = "incubator" if (raw_pass or incubator_ok or discovery_ok) else "rejected"
+        if funnel_stage == "incubator" and raw_pass:
+            reasons.append("discovery passed; local stability variants required")
 
     return {
         "strategy": candidate.strategy,
@@ -794,6 +981,13 @@ def evaluate_candidate(
         "positive_symbols": positive_symbols,
         "symbol_count": len(per_symbol),
         "per_symbol": per_symbol,
+        "validation_policy": {
+            "policy_version": RESEARCH_POLICY_VERSION,
+            "phase": candidate_phase,
+            "final_holdout_fraction": FINAL_HOLDOUT_FRACTION,
+            "final_holdout_days": deep_oos_days if candidate_phase == "deep_search" else None,
+            "deep_search_parameters_frozen": candidate_phase == "deep_search",
+        },
         "frequency_policy": {
             "hard_min_trades_per_day": float(min_trades_per_day),
             "preferred_from_trades_per_day": float(preferred_trades_per_day),
@@ -975,10 +1169,10 @@ def _atr(bars: List[dict], i: int, window: int = 14) -> float:
 
 
 def _simulate_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
-    p=candidate.params; w=int(p["window"]); trades=[]; i=w
+    p=candidate.params; w=int(p["window"]); trades=[]; i=w+1
     while i < len(bars)-1:
         if not _entry_ok(p, bars, i): i+=1; continue
-        prior=bars[i-w:i]
+        prior=bars[i-w-1:i-1]
         buf=float(p.get("buffer_bps",0))/10000
         high_level=max(float(x["h"]) for x in prior)*(1+buf)
         low_level=min(float(x["l"]) for x in prior)*(1-buf)
@@ -1066,10 +1260,10 @@ def _simulate_vwap_momentum(candidate: Candidate, symbol: str, bars: List[dict],
     return trades
 
 def _simulate_asymmetric_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
-    p=candidate.params; w=int(p["window"]); trades=[]; i=max(w,15)
+    p=candidate.params; w=int(p["window"]); trades=[]; i=max(w+1,15)
     while i < len(bars)-2:
         if not _entry_ok(p, bars, i): i+=1; continue
-        prior=bars[i-w:i]
+        prior=bars[i-w-1:i-1]
         prev=float(bars[i-1]["c"])
         high_break=max(float(x["h"]) for x in prior)
         low_break=min(float(x["l"]) for x in prior)
