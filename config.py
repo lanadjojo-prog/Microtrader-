@@ -31,10 +31,9 @@ class Settings:
     strategy_min_volume_ratio: float = _float("STRATEGY_MIN_VOLUME_RATIO", 0.70)
     strategy_volume_window: int = _int("STRATEGY_VOLUME_WINDOW", 50)
 
-    symbols_raw: str = os.getenv(
-        "SYMBOLS",
-        "SPY,QQQ,AAPL,MSFT,NVDA,AMD,AMZN,META,GOOGL,TSLA"
-    )
+    # Legacy stock settings are retained only for old modules and default to
+    # empty in the forex-only runtime.
+    symbols_raw: str = os.getenv("SYMBOLS", "")
     poll_seconds: int = _int("POLL_SECONDS", 20)
     bars_lookback: int = _int("BARS_LOOKBACK", 30)
     fast_window: int = _int("FAST_WINDOW", 4)
@@ -53,10 +52,7 @@ class Settings:
 
     data_feed: str = os.getenv("ALPACA_DATA_FEED", "iex")
 
-    lab_symbols_raw: str = os.getenv(
-        "LAB_SYMBOLS",
-        "SPY,QQQ,AAPL,MSFT,NVDA,AMD,AMZN,META,GOOGL,TSLA"
-    )
+    lab_symbols_raw: str = os.getenv("LAB_SYMBOLS", "")
     lab_lookback_days: int = _int("LAB_LOOKBACK_DAYS", 45)
     lab_timeframe: str = os.getenv("LAB_TIMEFRAME", "1Min")
     lab_max_bars_per_symbol: int = _int("LAB_MAX_BARS_PER_SYMBOL", 15000)
@@ -199,9 +195,10 @@ class Settings:
 
     @property
     def can_trade(self) -> bool:
-        if self.paper:
-            return True
-        return self.live_trading_enabled
+        # The active product is research + simulated paper only. Keeping this
+        # hard-false prevents accidentally reviving the legacy Alpaca execution
+        # path through an old module or environment variable.
+        return False
 
 
 settings = Settings()
