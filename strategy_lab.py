@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 from alpaca_client import AlpacaClient
 from config import Settings
 from strategy_store import StrategyStore
+from market_filters import entry_allowed
 
 log = logging.getLogger("microtrader.strategy_lab")
 
@@ -83,6 +84,10 @@ class StrategyLab:
             except Exception:
                 pass
         payload["summary"] = self._summary
+        payload["allowed_timeframes_min"] = [1, 5]
+        payload["min_trades_per_day"] = self.settings.strategy_min_trades_per_day
+        payload["entry_sessions"] = ["London", "New York"]
+        payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
         return payload
 
     def results(self) -> List[dict]:
@@ -91,7 +96,7 @@ class StrategyLab:
     def set_agent_focus(self, families: List[str], timeframes: List[int], reason: str = "") -> None:
         self._agent_focus = {
             "families": [str(x) for x in families][:6],
-            "timeframes": [int(x) for x in timeframes if int(x) in {1, 3, 5, 15}][:4],
+            "timeframes": [int(x) for x in timeframes if int(x) in {1, 5}][:2],
             "reason": str(reason)[:500],
         }
 
@@ -313,6 +318,7 @@ class StrategyLab:
                         self.settings.lab_max_drawdown_pct,
                         self.settings.lab_min_positive_symbol_ratio,
                         symbol_progress,
+                        min_trades_per_day=self.settings.strategy_min_trades_per_day,
                     )
                     elapsed = (datetime.now(timezone.utc) - started_candidate).total_seconds()
                     self.state.candidate_seconds = round(elapsed, 2)
@@ -437,8 +443,8 @@ def candidate_signature(candidate: Candidate) -> str:
 
 def discovery_candidates() -> List[Candidate]:
     out: List[Candidate] = []
-    for tf in (1, 3, 5, 15):
-        common = {"timeframe_min": tf, "_phase": "discovery"}
+    for tf in (1, 5):
+        common = {"timeframe_min": tf, "_phase": "discovery", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50}
         out.extend([
             Candidate("momentum", {**common, "fast": 4, "slow": 16, "entry_bps": 8.0, "max_hold": 16}),
             Candidate("mean_reversion", {**common, "window": 20, "z_entry": 1.5, "z_exit": 0.25, "max_hold": 20}),
@@ -570,7 +576,7 @@ def choose_batch(
     g = max(1, generation)
     epoch = max(0, (g - 1) // 6)
     wave = 1 + ((g - 1) % 6)
-    for tf in (1, 3, 5, 15):
+    for tf in (1, 5):
         broad = [
             Candidate("momentum", {"timeframe_min": tf, "_phase": "discovery",
                 "fast": 2 + (wave % 5), "slow": 10 + 3*wave + 2*epoch,
@@ -596,6 +602,7 @@ def choose_batch(
                 "max_hold": 30 + 5*wave + 2*epoch}),
         ]
         for cand in broad:
+            cand = Candidate(cand.strategy, {**cand.params, "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50})
             sig = candidate_signature(cand)
             if sig not in seen and sig not in local:
                 local.add(sig)
@@ -645,11 +652,14 @@ def evaluate_candidate(
     max_drawdown_pct: float = 6.0,
     min_positive_symbol_ratio: float = 0.60,
     progress_callback=None,
+    min_trades_per_day: float = 10.0,
 ) -> dict:
     train_trades: List[dict] = []
     oos_trades: List[dict] = []
     stress_oos_trades: List[dict] = []
     per_symbol: Dict[str, dict] = {}
+    train_days: set[str] = set()
+    oos_days: set[str] = set()
 
     symbol_items = list(bars_by_symbol.items())
     for symbol_index, (symbol, bars) in enumerate(symbol_items, start=1):
@@ -658,6 +668,8 @@ def evaluate_candidate(
         split = max(2, int(len(bars) * 0.70))
         train = bars[:split]
         test = bars[split:]
+        train_days.update(str(x.get("t") or "")[:10] for x in train if x.get("t"))
+        oos_days.update(str(x.get("t") or "")[:10] for x in test if x.get("t"))
 
         symbol_train = simulate(candidate, symbol, train, cost_bps)
         symbol_oos = simulate(candidate, symbol, test, cost_bps)
@@ -670,9 +682,9 @@ def evaluate_candidate(
             "stress_oos": metrics(symbol_stress),
         }
 
-    train_metrics = metrics(train_trades)
-    oos_metrics = metrics(oos_trades)
-    stress_metrics = metrics(stress_oos_trades)
+    train_metrics = metrics(train_trades, train_days)
+    oos_metrics = metrics(oos_trades, oos_days)
+    stress_metrics = metrics(stress_oos_trades, oos_days)
     positive_symbols = sum(
         1 for row in per_symbol.values()
         if row["oos"]["trades"] > 0 and row["oos"]["expectancy_bps"] > 0
@@ -685,6 +697,9 @@ def evaluate_candidate(
         reasons.append("negative in-sample expectancy")
     if oos_metrics["trades"] < min_oos_trades:
         reasons.append(f"fewer than {min_oos_trades} out-of-sample trades")
+    hard_frequency_pass = float(oos_metrics.get("avg_trades_per_day") or 0.0) >= float(min_trades_per_day)
+    if not hard_frequency_pass:
+        reasons.append(f"average trades/day below hard minimum {float(min_trades_per_day):g}")
     if oos_metrics["expectancy_bps"] <= 0:
         reasons.append("negative out-of-sample expectancy")
     if oos_metrics["profit_factor"] < min_profit_factor:
@@ -705,7 +720,9 @@ def evaluate_candidate(
     if raw_pass and not promoted:
         reasons.append("passes current filters; requires deep-search full-history confirmation")
     score = funnel_score(oos_metrics, stress_metrics, positive_symbol_ratio, min_oos_trades)
-    if promoted:
+    if not hard_frequency_pass:
+        funnel_stage = "rejected"
+    elif promoted:
         funnel_stage = "promoted"
     elif raw_pass or (
         oos_metrics["trades"] >= max(20, min_oos_trades // 2)
@@ -790,6 +807,7 @@ def _simulate_momentum(
     i = slow
 
     while i < len(bars) - 1:
+        if not _entry_ok(p, bars, i): i += 1; continue
         history = [float(x["c"]) for x in bars[i - slow:i]]
         fast_ma = mean(history[-int(p["fast"]):])
         slow_ma = mean(history)
@@ -830,6 +848,7 @@ def _simulate_mean_reversion(
     i = window
 
     while i < len(bars) - 1:
+        if not _entry_ok(p, bars, i): i += 1; continue
         history = [float(x["c"]) for x in bars[i - window:i]]
         mu = mean(history)
         sigma = pstdev(history)
@@ -865,6 +884,16 @@ def _simulate_mean_reversion(
 
 
 
+def _entry_ok(params: dict, bars: List[dict], i: int) -> bool:
+    allowed, _, _ = entry_allowed(
+        bars,
+        i,
+        min_volume_ratio=float(params.get("min_volume_ratio", 0.70)),
+        volume_window=int(params.get("volume_window", 50)),
+    )
+    return allowed
+
+
 def _atr(bars: List[dict], i: int, window: int = 14) -> float:
     vals = []
     for j in range(max(1, i-window), i):
@@ -877,6 +906,7 @@ def _atr(bars: List[dict], i: int, window: int = 14) -> float:
 def _simulate_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=w
     while i < len(bars)-1:
+        if not _entry_ok(p, bars, i): i+=1; continue
         level=max(float(x["h"]) for x in bars[i-w:i])*(1+float(p.get("buffer_bps",0))/10000)
         if float(bars[i-1]["c"]) <= level: i+=1; continue
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
@@ -887,6 +917,7 @@ def _simulate_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost
 def _simulate_extreme_reversal(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=w+1
     while i < len(bars)-1:
+        if not _entry_ok(p, bars, i): i+=1; continue
         rets=[float(bars[j]["c"])/float(bars[j-1]["c"])-1 for j in range(i-w,i)]
         sd=pstdev(rets) if len(rets)>1 else 0.0
         if sd<=0 or rets[-1] > -float(p["shock_z"])*sd: i+=1; continue
@@ -898,6 +929,7 @@ def _simulate_extreme_reversal(candidate: Candidate, symbol: str, bars: List[dic
 def _simulate_volatility_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=w+1
     while i < len(bars)-1:
+        if not _entry_ok(p, bars, i): i+=1; continue
         ranges=[float(x["h"])-float(x["l"]) for x in bars[i-w:i]]
         cur=float(bars[i-1]["h"])-float(bars[i-1]["l"])
         bullish=float(bars[i-1]["c"])>float(bars[i-1]["o"])
@@ -910,6 +942,7 @@ def _simulate_volatility_breakout(candidate: Candidate, symbol: str, bars: List[
 def _simulate_trend_pullback(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; slow=int(p["slow"]); fast=int(p["fast"]); trades=[]; i=slow
     while i < len(bars)-1:
+        if not _entry_ok(p, bars, i): i+=1; continue
         closes=[float(x["c"]) for x in bars[i-slow:i]]
         f=mean(closes[-fast:]); s=mean(closes); sd=pstdev(closes)
         z=(closes[-1]-f)/sd if sd>0 else 0
@@ -930,6 +963,7 @@ def _rolling_vwap(bars: List[dict], a: int, b: int) -> float:
 def _simulate_vwap_reversion(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=w
     while i < len(bars)-1:
+        if not _entry_ok(p, bars, i): i+=1; continue
         vw=_rolling_vwap(bars,i-w,i); closes=[float(x["c"]) for x in bars[i-w:i]]; sd=pstdev(closes)
         z=(closes[-1]-vw)/sd if sd>0 else 0
         if z > -float(p["z_entry"]): i+=1; continue
@@ -941,6 +975,7 @@ def _simulate_vwap_reversion(candidate: Candidate, symbol: str, bars: List[dict]
 def _simulate_vwap_momentum(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=w
     while i < len(bars)-1:
+        if not _entry_ok(p, bars, i): i+=1; continue
         vw=_rolling_vwap(bars,i-w,i); px=float(bars[i-1]["c"])
         if vw<=0 or ((px/vw)-1)*10000 < float(p["buffer_bps"]): i+=1; continue
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
@@ -951,6 +986,7 @@ def _simulate_vwap_momentum(candidate: Candidate, symbol: str, bars: List[dict],
 def _simulate_asymmetric_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=max(w,15)
     while i < len(bars)-2:
+        if not _entry_ok(p, bars, i): i+=1; continue
         prior=max(float(x["h"]) for x in bars[i-w:i])
         if float(bars[i-1]["c"]) <= prior: i+=1; continue
         entry=float(bars[i]["o"]); atr=_atr(bars,i,14)
@@ -990,10 +1026,15 @@ def _trade(
     }
 
 
-def metrics(trades: List[dict]) -> dict:
+def metrics(trades: List[dict], trading_days=None) -> dict:
+    days = len({str(x)[:10] for x in (trading_days or []) if str(x)})
+    if not days and trades:
+        days = len({str(t.get("entry_time") or "")[:10] for t in trades if t.get("entry_time")})
     if not trades:
         return {
             "trades": 0,
+            "trading_days": days,
+            "avg_trades_per_day": 0.0,
             "win_rate_pct": 0.0,
             "expectancy_bps": 0.0,
             "profit_factor": 0.0,
@@ -1028,6 +1069,8 @@ def metrics(trades: List[dict]) -> dict:
     r_values = [float(t["r_multiple"]) for t in ordered if t.get("r_multiple") is not None]
     return {
         "trades": len(returns),
+        "trading_days": days,
+        "avg_trades_per_day": round(len(returns) / days, 3) if days else 0.0,
         "win_rate_pct": round(100.0 * len(wins) / len(returns), 2),
         "expectancy_bps": round(mean(returns) * 10_000.0, 3),
         "profit_factor": round(min(pf, 999.0), 3),
