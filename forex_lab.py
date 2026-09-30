@@ -87,9 +87,23 @@ def apply_frequency_gate(results: List[dict], min_trades_per_day: float) -> List
 
 
 def phase_candidates_from_results(results: List[dict]) -> List[ForexCandidate]:
-    """Rebuild next-stage work from append-only stored runs."""
+    """Rebuild next-stage work from append-only stored runs.
+
+    Discovery stays baseline-only for CPU efficiency. Once a baseline earns
+    Incubator, we fan out a compact trade-management grid. The best Incubator
+    configuration is then frozen into Deep Search.
+    """
     queued: List[ForexCandidate] = []
     seen_local: set[str] = set()
+
+    def add(strategy: str, params: dict, phase: str) -> None:
+        candidate = ForexCandidate(strategy, _clean_params(params, phase))
+        key = candidate_signature(candidate)
+        if key in seen_local:
+            return
+        seen_local.add(key)
+        queued.append(candidate)
+
     for row in results:
         params = dict(row.get("params") or {})
         strategy = str(row.get("strategy") or "")
@@ -97,19 +111,43 @@ def phase_candidates_from_results(results: List[dict]) -> List[ForexCandidate]:
         if not strategy or status in {"rejected", "promoted"}:
             continue
         base_params = {k: v for k, v in params.items() if k != "_phase"}
-        next_phase = None
-        if status == "incubator":
-            next_phase = "incubator"
-        elif status == "deep_search":
-            next_phase = "deep_search"
-        if not next_phase:
+
+        if status == "deep_search":
+            # Freeze the exact Incubator winner for the final holdout.
+            add(strategy, base_params, "deep_search")
             continue
-        candidate = ForexCandidate(strategy, _clean_params(base_params, next_phase))
-        key = candidate_signature(candidate)
-        if key in seen_local:
+
+        if status != "incubator":
             continue
-        seen_local.add(key)
-        queued.append(candidate)
+
+        # Baseline always remains a contender.
+        baseline = dict(base_params)
+        baseline["exit_mode"] = "baseline"
+        baseline.pop("management_trigger_r", None)
+        baseline.pop("management_lock_net_r", None)
+        add(strategy, baseline, "incubator")
+
+        target_r = float(base_params.get("target_r") or 0.0)
+        management_grid = (
+            (1.0, 0.05, "safe_be_1r"),
+            (1.5, 0.05, "safe_be_1_5r"),
+            (2.0, 0.05, "safe_be_2r"),
+            (1.5, 0.25, "protect_1_5r_025r"),
+            (2.0, 0.25, "protect_2r_025r"),
+            (2.0, 0.50, "lock_2r_05r"),
+        )
+        for trigger_r, lock_net_r, label in management_grid:
+            # A management trigger at/above the final target is unreachable or
+            # ambiguous, so only test it when there is room beyond the trigger.
+            if target_r <= trigger_r:
+                continue
+            managed = dict(base_params)
+            managed["exit_mode"] = label
+            managed["management_trigger_r"] = trigger_r
+            managed["management_lock_net_r"] = lock_net_r
+            managed["breakeven_buffer_r"] = 0.05
+            add(strategy, managed, "incubator")
+
     queued.sort(key=lambda c: 0 if c.params.get("_phase") == "deep_search" else 1)
     return queued
 
@@ -153,6 +191,13 @@ class ForexStrategyLab:
         payload["allowed_timeframes_min"] = [1, 5]
         payload["entry_sessions"] = ["London", "New York"]
         payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
+        payload["trade_management"] = {
+            "search_stage": "incubator",
+            "trigger_grid_r": [1.0, 1.5, 2.0],
+            "net_lock_grid_r": [0.05, 0.25, 0.50],
+            "cost_adjusted": True,
+            "next_bar_activation": True,
+        }
         payload["results_loaded"] = len(self._results)
         return payload
 
