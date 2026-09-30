@@ -53,6 +53,13 @@ class PaperTradingStore:
                 )
             """)
             await conn.execute("""
+                ALTER TABLE microtrader_paper_positions
+                ADD COLUMN IF NOT EXISTS current_price DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS unrealized_r DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS unrealized_pnl DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS last_mark_at TIMESTAMPTZ
+            """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_paper_trades (
                     id BIGSERIAL PRIMARY KEY,
                     paper_id TEXT NOT NULL REFERENCES microtrader_paper_strategies(paper_id)
@@ -175,6 +182,11 @@ class PaperTradingStore:
                 """,
                 (str(status), paper_id),
             )
+            if str(status) == "policy_rejected":
+                await conn.execute(
+                    "DELETE FROM microtrader_paper_positions WHERE paper_id=%s",
+                    (paper_id,),
+                )
             await conn.commit()
 
     async def set_error(self, paper_id: str, error: str) -> None:
@@ -200,7 +212,8 @@ class PaperTradingStore:
             cur = await conn.execute(
                 """
                 SELECT paper_id, pair, direction, entry_time, entry_price,
-                       risk_distance, stop_price, target_price, bars_held, risk_eur
+                       risk_distance, stop_price, target_price, bars_held, risk_eur,
+                       current_price, unrealized_r, unrealized_pnl, last_mark_at
                 FROM microtrader_paper_positions
                 WHERE paper_id=%s
                 ORDER BY pair
@@ -217,8 +230,9 @@ class PaperTradingStore:
                 """
                 INSERT INTO microtrader_paper_positions (
                     paper_id, pair, direction, entry_time, entry_price,
-                    risk_distance, stop_price, target_price, bars_held, risk_eur
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    risk_distance, stop_price, target_price, bars_held, risk_eur,
+                    current_price, unrealized_r, unrealized_pnl, last_mark_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (paper_id, pair) DO UPDATE SET
                     direction=EXCLUDED.direction,
                     entry_time=EXCLUDED.entry_time,
@@ -227,7 +241,11 @@ class PaperTradingStore:
                     stop_price=EXCLUDED.stop_price,
                     target_price=EXCLUDED.target_price,
                     bars_held=EXCLUDED.bars_held,
-                    risk_eur=EXCLUDED.risk_eur
+                    risk_eur=EXCLUDED.risk_eur,
+                    current_price=EXCLUDED.current_price,
+                    unrealized_r=EXCLUDED.unrealized_r,
+                    unrealized_pnl=EXCLUDED.unrealized_pnl,
+                    last_mark_at=EXCLUDED.last_mark_at
                 """,
                 (
                     paper_id, pair, int(position["direction"]),
@@ -235,6 +253,39 @@ class PaperTradingStore:
                     float(position["risk_distance"]), float(position["stop_price"]),
                     float(position["target_price"]), int(position.get("bars_held", 0)),
                     float(position["risk_eur"]),
+                    float(position.get("current_price") or position["entry_price"]),
+                    float(position.get("unrealized_r") or 0.0),
+                    float(position.get("unrealized_pnl") or 0.0),
+                    position.get("last_mark_at") or position["entry_time"],
+                ),
+            )
+            await conn.commit()
+
+    async def mark_position(
+        self,
+        paper_id: str,
+        pair: str,
+        *,
+        current_price: float,
+        unrealized_r: float,
+        unrealized_pnl: float,
+        mark_time: str,
+    ) -> None:
+        if not self.enabled:
+            return
+        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+            await conn.execute(
+                """
+                UPDATE microtrader_paper_positions
+                SET current_price=%s,
+                    unrealized_r=%s,
+                    unrealized_pnl=%s,
+                    last_mark_at=%s
+                WHERE paper_id=%s AND pair=%s
+                """,
+                (
+                    float(current_price), float(unrealized_r),
+                    float(unrealized_pnl), mark_time, paper_id, pair,
                 ),
             )
             await conn.commit()
@@ -383,6 +434,7 @@ class PaperTradingStore:
                             SELECT paper_id, COUNT(*) AS open_positions
                             FROM microtrader_paper_positions GROUP BY paper_id
                         ) p ON p.paper_id=s.paper_id
+                        WHERE s.status <> 'policy_rejected'
                         ORDER BY s.started_at ASC
                         """
                     )
@@ -397,6 +449,7 @@ class PaperTradingStore:
                                d.updated_at, s.strategy, s.params
                         FROM microtrader_paper_daily d
                         JOIN microtrader_paper_strategies s ON s.paper_id=d.paper_id
+                        WHERE s.status <> 'policy_rejected'
                         ORDER BY d.trade_date DESC, d.paper_id
                         LIMIT %s
                         """,
@@ -414,6 +467,7 @@ class PaperTradingStore:
                                s.strategy, s.params
                         FROM microtrader_paper_trades t
                         JOIN microtrader_paper_strategies s ON s.paper_id=t.paper_id
+                        WHERE s.status <> 'policy_rejected'
                         ORDER BY t.exit_time DESC
                         LIMIT %s
                         """,
@@ -427,9 +481,11 @@ class PaperTradingStore:
                         """
                         SELECT p.paper_id, p.pair, p.direction, p.entry_time, p.entry_price,
                                p.stop_price, p.target_price, p.bars_held, p.risk_eur,
-                               s.strategy, s.params
+                               p.current_price, p.unrealized_r, p.unrealized_pnl,
+                               p.last_mark_at, s.strategy, s.params
                         FROM microtrader_paper_positions p
                         JOIN microtrader_paper_strategies s ON s.paper_id=p.paper_id
+                        WHERE s.status <> 'policy_rejected'
                         ORDER BY p.paper_id, p.pair
                         """
                     )
