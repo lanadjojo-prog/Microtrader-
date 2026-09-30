@@ -95,6 +95,8 @@ class StrategyLab:
         payload["portfolio_min_trades_per_day"] = self.settings.portfolio_min_trades_per_day
         payload["entry_sessions"] = ["London", "New York"]
         payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
+        payload["max_loss_streak"] = self.settings.strategy_max_loss_streak
+        payload["max_loss_streak_asymmetric"] = self.settings.strategy_max_loss_streak_asymmetric
         return payload
 
     def results(self) -> List[dict]:
@@ -344,6 +346,8 @@ class StrategyLab:
                         min_trades_per_day=self.settings.strategy_min_trades_per_day,
                         preferred_trades_per_day=self.settings.strategy_preferred_trades_per_day,
                         target_trades_per_day=self.settings.strategy_target_trades_per_day,
+                        max_loss_streak=self.settings.strategy_max_loss_streak,
+                        max_loss_streak_asymmetric=self.settings.strategy_max_loss_streak_asymmetric,
                     )
                     elapsed = (datetime.now(timezone.utc) - started_candidate).total_seconds()
                     self.state.candidate_seconds = round(elapsed, 2)
@@ -478,7 +482,7 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
-RESEARCH_POLICY_VERSION = "forex-ctrader-v4-holdout20-oos20-aligned-bars"
+RESEARCH_POLICY_VERSION = "forex-ctrader-v5-streak-gate-holdout20-oos20"
 FINAL_HOLDOUT_FRACTION = 0.20
 DISCOVERY_SOURCE_BARS = 10000
 INCUBATOR_SOURCE_BARS = 20000
@@ -856,6 +860,8 @@ def evaluate_candidate(
     min_trades_per_day: float = 3.0,
     preferred_trades_per_day: float = 5.0,
     target_trades_per_day: float = 10.0,
+    max_loss_streak: int = 5,
+    max_loss_streak_asymmetric: int = 7,
 ) -> dict:
     train_trades: List[dict] = []
     oos_trades: List[dict] = []
@@ -909,6 +915,18 @@ def evaluate_candidate(
     hard_frequency_pass = float(oos_metrics.get("avg_trades_per_day") or 0.0) >= float(min_trades_per_day)
     if not hard_frequency_pass:
         reasons.append(f"average trades/day below hard minimum {float(min_trades_per_day):g}")
+
+    allowed_loss_streak = (
+        int(max_loss_streak_asymmetric)
+        if candidate.strategy == "asymmetric_breakout"
+        else int(max_loss_streak)
+    )
+    observed_loss_streak = int(oos_metrics.get("max_loss_streak") or 0)
+    streak_pass = observed_loss_streak <= allowed_loss_streak
+    if not streak_pass:
+        reasons.append(
+            f"out-of-sample max loss streak {observed_loss_streak} exceeds {allowed_loss_streak}"
+        )
     if oos_metrics["expectancy_bps"] <= 0:
         reasons.append("negative out-of-sample expectancy")
     if oos_metrics["profit_factor"] < min_profit_factor:
@@ -940,6 +958,7 @@ def evaluate_candidate(
     )
     discovery_ok = (
         hard_frequency_pass
+        and streak_pass
         and oos_metrics["trades"] >= 15
         and (
             oos_metrics["expectancy_bps"] > 0
@@ -949,6 +968,7 @@ def evaluate_candidate(
     )
     incubator_ok = (
         hard_frequency_pass
+        and streak_pass
         and oos_metrics["trades"] >= max(20, min_oos_trades // 2)
         and oos_metrics["expectancy_bps"] > 0
         and oos_metrics["profit_factor"] >= 1.20
@@ -996,6 +1016,12 @@ def evaluate_candidate(
             "hard_min_trades_per_day": float(min_trades_per_day),
             "preferred_from_trades_per_day": float(preferred_trades_per_day),
             "target_trades_per_day": float(target_trades_per_day),
+        },
+        "streak_policy": {
+            "max_loss_streak_allowed": allowed_loss_streak,
+            "max_loss_streak_observed": observed_loss_streak,
+            "max_win_streak_observed": int(oos_metrics.get("max_win_streak") or 0),
+            "passed": streak_pass,
         },
     }
 
@@ -1336,6 +1362,8 @@ def metrics(trades: List[dict], trading_days=None) -> dict:
             "avg_loss_bps": 0.0,
             "payoff_ratio": 0.0,
             "expectancy_r": 0.0,
+            "max_win_streak": 0,
+            "max_loss_streak": 0,
         }
 
     ordered = sorted(trades, key=lambda x: str(x.get("exit_time") or ""))
@@ -1359,6 +1387,24 @@ def metrics(trades: List[dict], trading_days=None) -> dict:
     avg_loss = abs(mean(losses)) if losses else 0.0
     payoff = avg_win / avg_loss if avg_loss > 0 else (999.0 if avg_win > 0 else 0.0)
     r_values = [float(t["r_multiple"]) for t in ordered if t.get("r_multiple") is not None]
+
+    max_win_streak = 0
+    max_loss_streak = 0
+    current_win_streak = 0
+    current_loss_streak = 0
+    for r in returns:
+        if r > 0:
+            current_win_streak += 1
+            current_loss_streak = 0
+            max_win_streak = max(max_win_streak, current_win_streak)
+        elif r < 0:
+            current_loss_streak += 1
+            current_win_streak = 0
+            max_loss_streak = max(max_loss_streak, current_loss_streak)
+        else:
+            current_win_streak = 0
+            current_loss_streak = 0
+
     return {
         "trades": len(returns),
         "trading_days": days,
@@ -1372,4 +1418,6 @@ def metrics(trades: List[dict], trading_days=None) -> dict:
         "avg_loss_bps": round(avg_loss * 10_000.0, 3),
         "payoff_ratio": round(min(payoff, 999.0), 3),
         "expectancy_r": round(mean(r_values), 3) if r_values else 0.0,
+        "max_win_streak": max_win_streak,
+        "max_loss_streak": max_loss_streak,
     }
