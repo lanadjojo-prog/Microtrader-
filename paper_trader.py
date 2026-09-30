@@ -13,6 +13,7 @@ from config import Settings
 from ctrader_client import CTraderClient
 from forex_store import ForexStrategyStore
 from paper_store import PaperTradingStore
+from market_filters import entry_allowed
 
 log = logging.getLogger("microtrader.paper")
 
@@ -132,6 +133,9 @@ class PaperTradingEngine:
         payload["start_balance_eur"] = self.settings.paper_start_balance
         payload["poll_seconds"] = self.settings.paper_poll_seconds
         payload["execution"] = "simulated-only; no broker orders"
+        payload["allowed_timeframes_min"] = [1, 5]
+        payload["entry_sessions"] = ["London", "New York"]
+        payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
         return payload
 
     async def start(self) -> None:
@@ -173,6 +177,9 @@ class PaperTradingEngine:
         for row in promoted:
             strategy = str(row.get("strategy") or "")
             if strategy not in self.SUPPORTED:
+                continue
+            base_tf = int(row.get("timeframe_min") or (row.get("params") or {}).get("timeframe_min") or 0)
+            if base_tf not in (1, 5):
                 continue
             base_params = {
                 k: v for k, v in dict(row.get("params") or {}).items()
@@ -314,7 +321,17 @@ class PaperTradingEngine:
                         await self.store.upsert_position(paper_id, pair, pos)
                         positions[pair] = pos
                 else:
-                    direction = _signal(strategy, params, closed, i)
+                    allowed, session_name, volume_ratio = entry_allowed(
+                        closed,
+                        i,
+                        min_volume_ratio=float(
+                            params.get("min_volume_ratio", self.settings.strategy_min_volume_ratio)
+                        ),
+                        volume_window=int(
+                            params.get("volume_window", self.settings.strategy_volume_window)
+                        ),
+                    )
+                    direction = _signal(strategy, params, closed, i) if allowed else 0
                     if direction:
                         atr = _atr(closed, i, 14)
                         risk_distance = atr * float(params.get("stop_atr", 1.0))
@@ -337,6 +354,8 @@ class PaperTradingEngine:
                                 "target_price": target,
                                 "bars_held": 0,
                                 "risk_eur": risk_eur,
+                                "entry_session": session_name,
+                                "entry_volume_ratio": volume_ratio,
                             }
                             immediate = await self._manage_entry_bar(
                                 paper_id, pair, new_pos, bar, params
