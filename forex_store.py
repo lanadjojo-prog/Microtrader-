@@ -235,13 +235,22 @@ class ForexStrategyStore:
         ) as conn:
             cur = await conn.execute(
                 """
+                WITH active AS (
+                    SELECT strategy, family, status, tested_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY strategy, (params - '_phase')
+                               ORDER BY tested_at DESC
+                           ) AS rn
+                    FROM microtrader_forex_strategy_runs
+                    WHERE timeframe_min IN (1, 5)
+                      AND COALESCE(params->>'entry_sessions', '') = 'london_new_york'
+                      AND COALESCE(robustness->>'evaluation_policy_version', '') = %s
+                )
                 SELECT COALESCE(family, strategy) AS family,
                        COALESCE(status, 'rejected') AS funnel_stage,
                        COUNT(*)::integer AS candidates
-                FROM microtrader_forex_strategy_runs
-                WHERE timeframe_min IN (1, 5)
-                  AND COALESCE(params->>'entry_sessions', '') = 'london_new_york'
-                  AND COALESCE(robustness->>'evaluation_policy_version', '') = %s
+                FROM active
+                WHERE rn = 1
                 GROUP BY COALESCE(family, strategy), COALESCE(status, 'rejected')
                 ORDER BY funnel_stage, candidates DESC, family
                 """,
