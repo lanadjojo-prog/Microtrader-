@@ -302,6 +302,78 @@ class ForexResearchStore:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
+    async def load_research_memory(
+        self,
+        *,
+        per_family_stage: int = 40,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """Load a diverse, bounded research memory after restarts.
+
+        Keeping only the global top-N can let one strategy family crowd every
+        other family out of the next search generation. This query keeps the
+        strongest rows per family/stage while preserving every promoted row.
+        """
+        if not self.enabled:
+            return []
+        async with await psycopg.AsyncConnection.connect(
+            self.database_url, row_factory=dict_row
+        ) as conn:
+            cur = await conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT signature, strategy, params, promoted, rejection_reasons,
+                           train, oos, stress_oos, positive_symbol_ratio,
+                           positive_symbols, symbol_count, per_symbol,
+                           family, funnel_stage, funnel_score, tested_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY COALESCE(family, strategy),
+                                            COALESCE(funnel_stage, 'rejected')
+                               ORDER BY promoted DESC,
+                                        funnel_score DESC NULLS LAST,
+                                        (oos->>'expectancy_bps')::double precision DESC NULLS LAST,
+                                        tested_at DESC
+                           ) AS family_stage_rank
+                    FROM microtrader_forex_research_strategy_results
+                )
+                SELECT signature, strategy, params, promoted, rejection_reasons,
+                       train, oos, stress_oos, positive_symbol_ratio,
+                       positive_symbols, symbol_count, per_symbol,
+                       family, funnel_stage, funnel_score, tested_at
+                FROM ranked
+                WHERE promoted = TRUE OR family_stage_rank <= %s
+                ORDER BY promoted DESC,
+                         funnel_score DESC NULLS LAST,
+                         (oos->>'expectancy_bps')::double precision DESC NULLS LAST,
+                         tested_at DESC
+                LIMIT %s
+                """,
+                (max(1, int(per_family_stage)), max(1, int(limit))),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def funnel_summary(self, policy_version: str) -> List[Dict[str, Any]]:
+        """Return uncapped counts for the active research policy."""
+        if not self.enabled:
+            return []
+        async with await psycopg.AsyncConnection.connect(
+            self.database_url, row_factory=dict_row
+        ) as conn:
+            cur = await conn.execute(
+                """
+                SELECT COALESCE(family, strategy) AS family,
+                       COALESCE(funnel_stage, 'rejected') AS funnel_stage,
+                       COUNT(*)::integer AS candidates
+                FROM microtrader_forex_research_strategy_results
+                WHERE COALESCE(params->>'_policy_version', '') = %s
+                GROUP BY COALESCE(family, strategy),
+                         COALESCE(funnel_stage, 'rejected')
+                ORDER BY funnel_stage, candidates DESC, family
+                """,
+                (str(policy_version),),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
     async def load_signatures(self) -> set[str]:
         if not self.enabled:
             return set()
