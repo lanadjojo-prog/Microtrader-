@@ -207,6 +207,7 @@ class ForexStrategyStore:
                 WHERE (promoted = TRUE OR status = 'promoted')
                   AND timeframe_min IN (1, 5)
                   AND COALESCE(params->>'entry_sessions', '') = 'london_new_york'
+                  AND COALESCE(robustness->>'evaluation_policy_version', '') = 'forex-funnel-v3-frozen-holdout20'
                   AND COALESCE((oos->>'avg_trades_per_day')::double precision, 0) >= %s
                 ORDER BY tested_at ASC
                 LIMIT %s
