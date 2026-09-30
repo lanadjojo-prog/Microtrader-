@@ -264,12 +264,21 @@ class PrecisionStrategyStore:
         ) as conn:
             cur = await conn.execute(
                 """
+                WITH active AS (
+                    SELECT strategy, family, status, tested_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY strategy, (params - '_phase')
+                               ORDER BY tested_at DESC
+                           ) AS rn
+                    FROM microtrader_precision_runs
+                    WHERE COALESCE(params->>'entry_sessions', '') = 'london_new_york'
+                      AND COALESCE(execution_model->>'evaluation_policy_version', '') = %s
+                )
                 SELECT COALESCE(family, strategy) AS family,
                        COALESCE(status, 'rejected') AS funnel_stage,
                        COUNT(*)::integer AS candidates
-                FROM microtrader_precision_runs
-                WHERE COALESCE(params->>'entry_sessions', '') = 'london_new_york'
-                  AND COALESCE(execution_model->>'evaluation_policy_version', '') = %s
+                FROM active
+                WHERE rn = 1
                 GROUP BY COALESCE(family, strategy), COALESCE(status, 'rejected')
                 ORDER BY funnel_stage, candidates DESC, family
                 """,
