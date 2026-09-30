@@ -242,7 +242,7 @@ class PrecisionStrategyLab:
                 remaining = [
                     c for c in configured
                     if evaluation_signature(
-                        c, version, self.settings.strategy_min_trades_per_day
+                        c, version, evaluation_policy_key(self.settings)
                     ) not in seen
                 ]
                 if not remaining:
@@ -296,7 +296,7 @@ class PrecisionStrategyLab:
                     result["dataset"]["version"] = version
                     result["dataset"]["source"] = self.settings.precision_data_provider
                     signature = evaluation_signature(
-                        candidate, version, self.settings.strategy_min_trades_per_day
+                        candidate, version, evaluation_policy_key(self.settings)
                     )
                     run_id = await self.store.save_run(signature, result)
                     clean = {k: v for k, v in result.items() if not k.startswith("_")}
@@ -353,15 +353,27 @@ def dataset_version(bars: Dict[str, List[dict]], ticks: Dict[str, List[QuoteTick
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
 
 
+def evaluation_policy_key(settings: Settings) -> str:
+    payload = {
+        "version": "precision-v2-policy-fingerprint",
+        "commission_pips_roundtrip": settings.precision_commission_pips,
+        "stress_multiplier": settings.precision_stress_multiplier,
+        "min_oos_trades": settings.precision_min_oos_trades,
+        "min_profit_factor": settings.precision_min_profit_factor,
+        "min_trades_per_day": settings.strategy_min_trades_per_day,
+        "preferred_trades_per_day": settings.strategy_preferred_trades_per_day,
+        "target_trades_per_day": settings.strategy_target_trades_per_day,
+        "min_volume_ratio": settings.strategy_min_volume_ratio,
+        "volume_window": settings.strategy_volume_window,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def evaluation_signature(
     candidate: PrecisionCandidate,
     data_version: str,
-    min_trades_per_day: float = 10.0,
+    policy_key: str = "precision-v2-default",
 ) -> str:
-    raw = (
-        candidate_signature(candidate)
-        + ":"
-        + data_version
-        + f":hard-min-trades-day={float(min_trades_per_day):g}:v1"
-    )
+    raw = candidate_signature(candidate) + ":" + data_version + ":policy=" + str(policy_key)
     return hashlib.sha256(raw.encode()).hexdigest()
