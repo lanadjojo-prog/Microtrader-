@@ -7,9 +7,9 @@ from datetime import datetime, timedelta, timezone
 from statistics import mean, pstdev
 from typing import Dict, List, Optional
 
-from alpaca_client import AlpacaClient
+from ctrader_client import CTraderClient
 from config import Settings
-from strategy_store import StrategyStore
+from forex_research_store import ForexResearchStore
 from market_filters import entry_allowed
 
 log = logging.getLogger("microtrader.strategy_lab")
@@ -61,7 +61,7 @@ class LabState:
 
 
 class StrategyLab:
-    def __init__(self, settings: Settings, client: AlpacaClient):
+    def __init__(self, settings: Settings, client: CTraderClient):
         self.settings = settings
         self.client = client
         self.state = LabState()
@@ -69,7 +69,7 @@ class StrategyLab:
         self._results: List[dict] = []
         self._summary: dict = {}
         self._agent_focus: dict = {"families": [], "timeframes": [], "reason": ""}
-        self.store = StrategyStore(settings.database_url)
+        self.store = ForexResearchStore(settings.database_url)
         self._persist_queue: asyncio.Queue = asyncio.Queue()
         self._persist_task: Optional[asyncio.Task] = None
         self._pause_event = asyncio.Event()
@@ -84,6 +84,10 @@ class StrategyLab:
             except Exception:
                 pass
         payload["summary"] = self._summary
+        payload["market"] = "forex"
+        payload["data_source"] = "cTrader / Fusion demo"
+        payload["pairs"] = list(self.settings.forex_pairs)
+        payload["start_capital_eur"] = self.settings.forex_start_capital
         payload["allowed_timeframes_min"] = [1, 5]
         payload["min_trades_per_day"] = self.settings.strategy_min_trades_per_day
         payload["preferred_trades_per_day"] = self.settings.strategy_preferred_trades_per_day
@@ -113,8 +117,8 @@ class StrategyLab:
             running=True,
             started_at=datetime.now(timezone.utc).isoformat(),
             stage="starting",
-            message="Preparing Strategy Lab",
-            symbols_total=len(self.settings.lab_symbols),
+            message="Preparing Forex Research Lab",
+            symbols_total=len(self.settings.forex_pairs),
             target_promoted=self.settings.lab_target_promoted,
         )
         self._results = []
@@ -194,27 +198,24 @@ class StrategyLab:
 
     async def _run(self):
         try:
-            end = datetime.now(timezone.utc)
-            start = end - timedelta(days=self.settings.lab_lookback_days)
             bars_by_symbol: Dict[str, List[dict]] = {}
             self.state.stage = "loading_data"
-            self.state.message = "Loading historical market data"
-            for symbol in self.settings.lab_symbols:
-                self.state.message = f"Loading {symbol}"
+            self.state.message = "Loading cTrader forex market data"
+            for pair in self.settings.forex_pairs:
+                self.state.message = f"Loading {pair} from cTrader"
                 bars = await self.client.historical_bars(
-                    symbol=symbol,
-                    start=start,
-                    end=end,
-                    timeframe=self.settings.lab_timeframe,
-                    max_bars=self.settings.lab_max_bars_per_symbol,
+                    pair,
+                    timeframe_min=1,
+                    max_bars=self.settings.forex_max_bars_per_pair,
+                    lookback_days=self.settings.forex_lookback_days,
                 )
                 if len(bars) >= 100:
-                    bars_by_symbol[symbol] = bars
+                    bars_by_symbol[pair] = bars
                 self.state.symbols_loaded += 1
                 await asyncio.sleep(0)
 
             if not bars_by_symbol:
-                raise RuntimeError("No usable historical bars returned for Strategy Lab")
+                raise RuntimeError("No usable cTrader forex bars returned for Research Lab")
 
             await self.store.init()
             persisted = await self.store.load_results(limit=250)
@@ -224,6 +225,8 @@ class StrategyLab:
                 row for row in persisted
                 if int((row.get("params") or {}).get("timeframe_min") or 0) in (1, 5)
                 and str((row.get("params") or {}).get("entry_sessions") or "") == "london_new_york"
+                and str((row.get("params") or {}).get("market") or "") == "forex"
+                and str((row.get("params") or {}).get("data_source") or "") == "ctrader"
             ]
             persisted_signatures = await self.store.load_signatures()
             persisted_state = await self.store.load_state()
@@ -284,10 +287,10 @@ class StrategyLab:
                     # Incubator gets more history, Deep Search must confirm on the
                     # full configured dataset before promotion is possible.
                     phase_bar_budget = {
-                        "discovery": min(5000, self.settings.lab_max_bars_per_symbol),
-                        "incubator": min(10000, self.settings.lab_max_bars_per_symbol),
-                        "deep_search": self.settings.lab_max_bars_per_symbol,
-                    }.get(candidate_phase, self.settings.lab_max_bars_per_symbol)
+                        "discovery": min(5000, self.settings.forex_max_bars_per_pair),
+                        "incubator": min(10000, self.settings.forex_max_bars_per_pair),
+                        "deep_search": self.settings.forex_max_bars_per_pair,
+                    }.get(candidate_phase, self.settings.forex_max_bars_per_pair)
                     tf = int(candidate.params.get("timeframe_min", 1))
                     candidate_bars = {
                         s: aggregate_bars(v[-phase_bar_budget:], tf)
@@ -321,10 +324,10 @@ class StrategyLab:
                         evaluate_candidate,
                         candidate,
                         candidate_bars,
-                        self.settings.lab_cost_bps,
-                        self.settings.lab_stress_cost_multiplier,
-                        self.settings.lab_min_oos_trades,
-                        self.settings.lab_min_profit_factor,
+                        self.settings.forex_cost_bps,
+                        self.settings.forex_stress_cost_multiplier,
+                        self.settings.forex_min_oos_trades,
+                        self.settings.forex_min_profit_factor,
                         self.settings.lab_max_drawdown_pct,
                         self.settings.lab_min_positive_symbol_ratio,
                         symbol_progress,
@@ -389,7 +392,10 @@ class StrategyLab:
                     self._summary = {
                         "symbols": list(bars_by_symbol.keys()),
                         "bars": {s: len(v) for s, v in bars_by_symbol.items()},
-                        "source_timeframe": self.settings.lab_timeframe,
+                        "market": "forex",
+                        "data_source": "cTrader / Fusion demo",
+                        "pairs": list(self.settings.forex_pairs),
+                        "source_timeframe": "1Min",
                         "agent_focus": self.agent_focus(),
                         "candidates_tested": self.state.tested_total,
                         "promoted_count": len(promoted),
@@ -407,11 +413,12 @@ class StrategyLab:
                             reverse=True,
                         )[:10],
                         "best_candidate": promoted[0] if promoted else (results[0] if results else None),
-                        "cost_bps_per_side": self.settings.lab_cost_bps,
-                        "stress_cost_multiplier": self.settings.lab_stress_cost_multiplier,
+                        "cost_bps_per_side": self.settings.forex_cost_bps,
+                        "stress_cost_multiplier": self.settings.forex_stress_cost_multiplier,
                         "method": (
-                            "continuous deterministic candidate search; chronological 70/30 holdout; "
-                            "next-bar-open fills; long-only; per-symbol robustness filter"
+                            "forex-only cTrader research; chronological 70/30 holdout; "
+                            "1m/5m; London/New York entries; relative-volume filter; "
+                            "next-bar-open fills; per-pair robustness filter"
                         ),
                     }
                     await asyncio.sleep(0)
@@ -448,7 +455,7 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
-RESEARCH_POLICY_VERSION = "frequency-v2-min3-preferred5-target10-portfolio10"
+RESEARCH_POLICY_VERSION = "forex-ctrader-v1-frequency-v2-min3-preferred5-target10-portfolio10"
 
 def candidate_signature(candidate: Candidate) -> str:
     import json
@@ -462,7 +469,7 @@ def candidate_signature(candidate: Candidate) -> str:
 def discovery_candidates() -> List[Candidate]:
     out: List[Candidate] = []
     for tf in (1, 5):
-        common = {"timeframe_min": tf, "_phase": "discovery", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50}
+        common = {"timeframe_min": tf, "_phase": "discovery", "market": "forex", "data_source": "ctrader", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50}
         out.extend([
             Candidate("momentum", {**common, "fast": 4, "slow": 16, "entry_bps": 8.0, "max_hold": 16}),
             Candidate("mean_reversion", {**common, "window": 20, "z_entry": 1.5, "z_exit": 0.25, "max_hold": 20}),
@@ -620,7 +627,7 @@ def choose_batch(
                 "max_hold": 30 + 5*wave + 2*epoch}),
         ]
         for cand in broad:
-            cand = Candidate(cand.strategy, {**cand.params, "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50})
+            cand = Candidate(cand.strategy, {**cand.params, "market": "forex", "data_source": "ctrader", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50})
             sig = candidate_signature(cand)
             if sig not in seen and sig not in local:
                 local.add(sig)
