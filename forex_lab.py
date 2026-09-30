@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from config import Settings
 from ctrader_client import CTraderClient
 from forex_backtest import (
+    FOREX_EVALUATION_POLICY_VERSION,
     ForexCandidate,
     candidate_grid,
     candidate_signature,
@@ -63,6 +64,9 @@ def apply_frequency_gate(results: List[dict], min_trades_per_day: float) -> List
         if tf not in (1, 5):
             continue
         if str(params.get("entry_sessions") or "") != "london_new_york":
+            continue
+        robustness = dict(item.get("robustness") or {})
+        if str(robustness.get("evaluation_policy_version") or "") != FOREX_EVALUATION_POLICY_VERSION:
             continue
         oos = dict(item.get("oos") or {})
         observed = float(oos.get("avg_trades_per_day") or 0.0)
@@ -449,7 +453,7 @@ def dataset_version(bars_by_pair: Dict[str, List[dict]]) -> str:
 
 def evaluation_policy_key(settings: Settings) -> str:
     payload = {
-        "version": "forex-funnel-v3-frozen-holdout20",
+        "version": FOREX_EVALUATION_POLICY_VERSION,
         "cost_bps": settings.forex_cost_bps,
         "stress_multiplier": settings.forex_stress_cost_multiplier,
         "min_oos_trades": settings.forex_min_oos_trades,
