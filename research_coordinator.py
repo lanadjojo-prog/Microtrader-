@@ -31,7 +31,7 @@ class ResearchCoordinator:
     """Serializes CPU-heavy research on small Render instances.
 
     Strategy discovery owns the CPU by default. Full Research Labs only run
-    when the stock funnel produces a genuinely promising candidate, at which
+    when the forex funnel produces a genuinely promising candidate, at which
     point discovery pauses between candidates and resumes afterwards.
     """
 
@@ -51,7 +51,7 @@ class ResearchCoordinator:
         self.state = CoordinatorState(
             running=True,
             mode="discovery",
-            message="Stock discovery has CPU priority; validation is queued only for promising candidates.",
+            message="Forex discovery has CPU priority; validation is queued only for promising candidates.",
         )
         self._task = asyncio.create_task(self._run(), name="microtrader-research-coordinator")
 
@@ -97,7 +97,7 @@ class ResearchCoordinator:
         self.state.queued_strategy = str(row.get("strategy") or "")
         self.state.queued_stage = str(row.get("funnel_stage") or "")
         self.state.message = (
-            f"Pausing stock discovery to run full research validation on "
+            f"Pausing forex discovery to run full research validation on "
             f"{self.state.queued_strategy} ({self.state.queued_stage})."
         )
         log.info("Coordinator validation start: strategy=%s stage=%s signature=%s",
@@ -120,7 +120,7 @@ class ResearchCoordinator:
             self.state.validations_completed += 1
             self.state.last_validation_signature = sig
             self.state.last_validation_at = datetime.now(timezone.utc).isoformat()
-            self.state.message = "Validation completed; stock discovery resumed."
+            self.state.message = "Validation completed; forex discovery resumed."
             log.info("Coordinator validation complete: strategy=%s signature=%s",
                      self.state.queued_strategy, sig[:12])
         finally:
