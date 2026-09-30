@@ -9,6 +9,8 @@ from typing import Dict, List, Optional
 from forex_metrics import strategy_metrics
 from market_filters import entry_allowed
 
+FOREX_EVALUATION_POLICY_VERSION = "forex-funnel-v3-frozen-holdout20"
+
 
 @dataclass(frozen=True)
 class ForexCandidate:
@@ -527,7 +529,8 @@ def evaluate_candidate(
             "start_capital_eur": start_capital,
             "fixed_risk_eur": float(candidate.params.get("risk_eur", 0.75)),
             "target_r": float(candidate.params.get("target_r", 0.0)),
-            "note": "PnL is a fixed-risk R simulation; broker margin/lot constraints are validated separately.",
+            "broker_constraints_checked": False,
+            "note": "Fixed-risk research model only; broker minimum volume, margin and exact cash risk still require separate demo-account validation.",
         },
         "train": train_metrics,
         "oos": oos_metrics,
@@ -537,6 +540,7 @@ def evaluate_candidate(
         "positive_pairs": positive_pairs,
         "pair_count": len(per_pair),
         "robustness": {
+            "evaluation_policy_version": FOREX_EVALUATION_POLICY_VERSION,
             "positive_pair_ratio": round(positive_pair_ratio, 3),
             "positive_pairs": positive_pairs,
             "pair_count": len(per_pair),
