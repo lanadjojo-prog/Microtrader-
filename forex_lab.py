@@ -304,7 +304,9 @@ class ForexStrategyLab:
                 candidate_seen: set[str] = set()
                 for candidate in ordered:
                     sig = evaluation_signature(
-                        candidate, source, self.settings.strategy_min_trades_per_day
+                        candidate,
+                        source,
+                        evaluation_policy_key(self.settings),
                     )
                     local_key = candidate_signature(candidate)
                     if sig in seen or local_key in candidate_seen:
@@ -336,10 +338,19 @@ class ForexStrategyLab:
                     if not self.state.running:
                         break
                     tf = int(candidate.params.get("timeframe_min", 1))
-                    bars = {
-                        pair: aggregate_bars(pair_bars, tf)
-                        for pair, pair_bars in source.items()
-                    }
+                    phase = str(candidate.params.get("_phase", "discovery"))
+                    bars: Dict[str, List[dict]] = {}
+                    for pair, pair_bars in source.items():
+                        if phase == "deep_search":
+                            selected = pair_bars
+                        else:
+                            holdout_start = max(2, int(len(pair_bars) * 0.80))
+                            pre_holdout = pair_bars[:holdout_start]
+                            if phase == "discovery":
+                                selected = pre_holdout[-min(10000, len(pre_holdout)):]
+                            else:
+                                selected = pre_holdout
+                        bars[pair] = aggregate_bars(selected, tf)
                     self.state.current_candidate = candidate.strategy
                     self.state.current_params = dict(candidate.params)
                     self.state.message = (
@@ -368,7 +379,9 @@ class ForexStrategyLab:
                         start_capital=self.settings.forex_start_capital,
                     )
                     signature = evaluation_signature(
-                        candidate, source, self.settings.strategy_min_trades_per_day
+                        candidate,
+                        source,
+                        evaluation_policy_key(self.settings),
                     )
                     result["dataset"]["version"] = dataset_version(source)
                     result["dataset"]["source"] = self.settings.forex_data_provider
@@ -434,16 +447,35 @@ def dataset_version(bars_by_pair: Dict[str, List[dict]]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def evaluation_policy_key(settings: Settings) -> str:
+    payload = {
+        "version": "forex-funnel-v3-frozen-holdout20",
+        "cost_bps": settings.forex_cost_bps,
+        "stress_multiplier": settings.forex_stress_cost_multiplier,
+        "min_oos_trades": settings.forex_min_oos_trades,
+        "min_profit_factor": settings.forex_min_profit_factor,
+        "min_payoff_ratio": settings.forex_min_payoff_ratio,
+        "min_trades_per_day": settings.strategy_min_trades_per_day,
+        "preferred_trades_per_day": settings.strategy_preferred_trades_per_day,
+        "target_trades_per_day": settings.strategy_target_trades_per_day,
+        "min_volume_ratio": settings.strategy_min_volume_ratio,
+        "volume_window": settings.strategy_volume_window,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def evaluation_signature(
     candidate: ForexCandidate,
     bars_by_pair: Dict[str, List[dict]],
-    min_trades_per_day: float = 10.0,
+    policy_key: str = "forex-funnel-v3-default",
 ) -> str:
     raw = (
         candidate_signature(candidate)
         + ":"
         + dataset_version(bars_by_pair)
-        + f":hard-min-trades-day={float(min_trades_per_day):g}:v1"
+        + ":policy="
+        + str(policy_key)
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
