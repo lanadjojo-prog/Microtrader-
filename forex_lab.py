@@ -194,6 +194,26 @@ class ForexStrategyLab:
             self.state.tested_total = int(saved.get("tested_total", 0))
             self.state.promoted_total = int(saved.get("promoted_total", 0))
             self._results = await self.store.load_results(limit=1000)
+            for row in [x for x in self._results if str(x.get("status") or x.get("funnel_stage") or "") == "promoted"][:5]:
+                oos = row.get("oos") or {}
+                stress = row.get("stress_oos") or {}
+                log.info(
+                    "PROMOTED forex strategy=%s tf=%s params=%s score=%s "
+                    "oos_trades=%s oos_pf=%s oos_exp_r=%s oos_win=%s "
+                    "stress_pf=%s stress_exp_r=%s positive_pairs=%s/%s",
+                    row.get("strategy"),
+                    row.get("timeframe_min"),
+                    row.get("params"),
+                    row.get("funnel_score"),
+                    oos.get("trades"),
+                    oos.get("profit_factor"),
+                    oos.get("expectancy_r"),
+                    oos.get("win_rate_pct"),
+                    stress.get("profit_factor"),
+                    stress.get("expectancy_r"),
+                    row.get("positive_pairs"),
+                    row.get("pair_count"),
+                )
 
             source: Dict[str, List[dict]] = {}
             while self.state.running:
