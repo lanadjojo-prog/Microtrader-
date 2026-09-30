@@ -56,6 +56,14 @@ def apply_frequency_gate(results: List[dict], min_trades_per_day: float) -> List
     threshold = float(min_trades_per_day)
     for row in results:
         item = dict(row)
+        params = dict(item.get("params") or {})
+        tf = int(item.get("timeframe_min") or params.get("timeframe_min") or 0)
+        # Current policy only keeps freshly evaluated 1m/5m strategies with
+        # the liquid-session + relative-volume entry filter.
+        if tf not in (1, 5):
+            continue
+        if str(params.get("entry_sessions") or "") != "london_new_york":
+            continue
         oos = dict(item.get("oos") or {})
         observed = float(oos.get("avg_trades_per_day") or 0.0)
         if observed < threshold:
@@ -135,6 +143,9 @@ class ForexStrategyLab:
         payload["risk_eur"] = self.settings.forex_risk_eur
         payload["cost_bps_per_side"] = self.settings.forex_cost_bps
         payload["min_trades_per_day"] = self.settings.strategy_min_trades_per_day
+        payload["allowed_timeframes_min"] = [1, 5]
+        payload["entry_sessions"] = ["London", "New York"]
+        payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
         payload["results_loaded"] = len(self._results)
         return payload
 
@@ -270,7 +281,12 @@ class ForexStrategyLab:
                 advanced = phase_candidates_from_results(self._results)
                 discovery: List[ForexCandidate] = []
                 for candidate in candidate_grid():
-                    base = {**candidate.params}
+                    base = {
+                        **candidate.params,
+                        "entry_sessions": "london_new_york",
+                        "min_volume_ratio": self.settings.strategy_min_volume_ratio,
+                        "volume_window": self.settings.strategy_volume_window,
+                    }
                     for risk_eur in (2.0, 3.0):
                         discovery.append(
                             ForexCandidate(
@@ -328,6 +344,7 @@ class ForexStrategyLab:
                         f"{idx}/{len(batch)} · {candidate.strategy} · "
                         f"{tf}m · target {candidate.params.get('target_r')}R · "
                         f"risk €{candidate.params.get('risk_eur')} · "
+                        f"London/NY · vol ≥{self.settings.strategy_min_volume_ratio:.2f}x · "
                         f"hard min {self.settings.strategy_min_trades_per_day:g} trades/day"
                     )
 
