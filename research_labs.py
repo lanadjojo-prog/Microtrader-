@@ -28,6 +28,8 @@ class ResearchState:
     completed_labs: int = 0
     total_labs: int = 0
     last_error: Optional[str] = None
+    requested_strategy: str = ""
+    requested_signature: str = ""
 
 
 LABS = [
@@ -47,6 +49,7 @@ class ResearchLabs:
         self.state=ResearchState(total_labs=len(LABS))
         self._task: Optional[asyncio.Task]=None
         self._results: Dict[str,dict]={}
+        self._requested_candidate: Optional[Candidate]=None
 
     def public_state(self):
         p=asdict(self.state)
@@ -56,11 +59,24 @@ class ResearchLabs:
         p["labs"]={k:v for k,v in self._results.items()}
         return p
 
-    async def start(self):
+    async def start(self, candidate: Optional[Candidate] = None):
         if self.state.running:
             return
-        self.state=ResearchState(running=True,started_at=datetime.now(timezone.utc).isoformat(),total_labs=len(LABS))
-        log.info("Research Labs start requested")
+        self._requested_candidate = candidate
+        requested_signature = candidate_signature(candidate) if candidate else ""
+        self.state=ResearchState(
+            running=True,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            total_labs=len(LABS),
+            requested_strategy=candidate.strategy if candidate else "",
+            requested_signature=requested_signature,
+        )
+        self._results = {}
+        log.info(
+            "Research Labs start requested: strategy=%s signature=%s",
+            candidate.strategy if candidate else "auto",
+            requested_signature[:12] if requested_signature else "-",
+        )
         self._task=asyncio.create_task(self._run(),name="microtrader-research-labs")
 
     async def stop(self):
@@ -87,44 +103,51 @@ class ResearchLabs:
             if not bars_by_symbol:
                 raise RuntimeError("No usable cTrader forex data available for validation")
 
-            ss=ForexResearchStore(self.settings.database_url)
-            await ss.init()
-            rows=await ss.load_results(limit=25)
-            candidates=[]
-            for row in rows:
-                try:
-                    params = dict(row["params"])
-                    tf = int(params.get("timeframe_min") or 0)
-                    avg_tpd = float((row.get("oos") or {}).get("avg_trades_per_day") or 0.0)
-                    if tf not in (1, 5):
+            if self._requested_candidate is not None:
+                candidates = [self._requested_candidate]
+            else:
+                # Fallback for manual starts: validate only the strongest eligible
+                # active-policy candidate instead of an arbitrary top-8 batch.
+                ss=ForexResearchStore(self.settings.database_url)
+                await ss.init()
+                rows=await ss.load_research_memory(per_family_stage=20, limit=200)
+                candidates=[]
+                for row in rows:
+                    try:
+                        params = dict(row["params"])
+                        tf = int(params.get("timeframe_min") or 0)
+                        avg_tpd = float((row.get("oos") or {}).get("avg_trades_per_day") or 0.0)
+                        if tf not in (1, 5):
+                            continue
+                        if str(params.get("market") or "") != "forex":
+                            continue
+                        if str(params.get("data_source") or "") != "ctrader":
+                            continue
+                        if str(params.get("direction_mode") or "") != "long_short":
+                            continue
+                        if avg_tpd < float(self.settings.strategy_min_trades_per_day):
+                            continue
+                        params["market"] = "forex"
+                        params["data_source"] = "ctrader"
+                        params["direction_mode"] = "long_short"
+                        params["entry_sessions"] = "london_new_york"
+                        params["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
+                        params["volume_window"] = self.settings.strategy_volume_window
+                        candidates.append(Candidate(str(row["strategy"]), params))
+                    except Exception:
                         continue
-                    if str(params.get("market") or "") != "forex":
-                        continue
-                    if str(params.get("data_source") or "") != "ctrader":
-                        continue
-                    if str(params.get("direction_mode") or "") != "long_short":
-                        continue
-                    if avg_tpd < float(self.settings.strategy_min_trades_per_day):
-                        continue
-                    params["market"] = "forex"
-                    params["data_source"] = "ctrader"
-                    params["direction_mode"] = "long_short"
-                    params["entry_sessions"] = "london_new_york"
-                    params["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
-                    params["volume_window"] = self.settings.strategy_volume_window
-                    candidates.append(Candidate(str(row["strategy"]), params))
-                except Exception:
-                    continue
-            if not candidates:
-                raise RuntimeError("No eligible 1m/5m forex Research Lab candidates meeting the hard trades/day rule yet")
+                    if candidates:
+                        break
+                if not candidates:
+                    raise RuntimeError(
+                        "No eligible forex Research candidate available for validation"
+                    )
 
-            # favor stronger candidates but still test multiple distinct configs
-            seen=set(); uniq=[]
-            for c in candidates:
-                sig=candidate_signature(c)
-                if sig not in seen:
-                    seen.add(sig); uniq.append(c)
-            candidates=uniq[:8]
+            log.info(
+                "Research Labs validating exact candidate: strategy=%s signature=%s",
+                candidates[0].strategy,
+                candidate_signature(candidates[0])[:12],
+            )
 
             for name in LABS[:-1]:
                 self.state.current_lab=name
