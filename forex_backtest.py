@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 from forex_metrics import strategy_metrics
 from market_filters import entry_allowed
 
-FOREX_EVALUATION_POLICY_VERSION = "forex-funnel-v4-holdout20-oos20"
+FOREX_EVALUATION_POLICY_VERSION = "forex-funnel-v5-cost-adjusted-breakeven"
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,7 @@ def candidate_grid() -> List[ForexCandidate]:
                         "stop_atr": stop_atr,
                         "risk_eur": 0.75,
                         "exit_mode": exit_mode,
+                        "breakeven_buffer_r": 0.05,
                         "entry_sessions": "london_new_york",
                         "min_volume_ratio": 0.70,
                         "volume_window": 50,
@@ -110,10 +111,26 @@ def _trade(
     }
 
 
-def _exit_management(params: dict) -> tuple[float | None, float | None]:
+def _exit_management(
+    params: dict,
+    *,
+    entry: float,
+    risk_distance: float,
+    cost_bps: float,
+) -> tuple[float | None, float | None]:
+    """Return trigger-R and the gross stop lock in R.
+
+    "Breakeven" is deliberately cost-adjusted: the stop covers the modeled
+    round-trip trading cost plus a small positive-R cushion for unmodeled
+    slippage. Therefore a BE stop is not placed at the raw entry price.
+    """
     mode = str(params.get("exit_mode") or "baseline")
     if mode == "breakeven_2r":
-        return 2.0, 0.0
+        risk_pct = risk_distance / entry if entry > 0 else 0.0
+        roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
+        cost_r = roundtrip_cost_pct / risk_pct if risk_pct > 0 else 0.0
+        buffer_r = max(0.0, float(params.get("breakeven_buffer_r", 0.05)))
+        return 2.0, cost_r + buffer_r
     if mode == "protect_2r_025r":
         return 2.0, 0.25
     if mode == "lock_2r_05r":
@@ -131,6 +148,7 @@ def _run_asymmetric_exit(
     target_r: float,
     max_hold: int,
     params: dict,
+    cost_bps: float,
 ) -> tuple[int, float]:
     if direction > 0:
         stop = entry - risk_distance
@@ -142,7 +160,12 @@ def _run_asymmetric_exit(
     last_idx = min(entry_idx + max_hold, len(bars) - 1)
     exit_price = float(bars[last_idx]["c"])
 
-    trigger_r, lock_r = _exit_management(params)
+    trigger_r, lock_r = _exit_management(
+        params,
+        entry=entry,
+        risk_distance=risk_distance,
+        cost_bps=cost_bps,
+    )
     protection_active = False
 
     for j in range(entry_idx, last_idx + 1):
@@ -226,6 +249,7 @@ def _simulate_asymmetric_breakout(
             bars, i, direction=direction, entry=entry,
             risk_distance=risk_distance, target_r=target_r, max_hold=max_hold,
             params=p,
+            cost_bps=cost_bps,
         )
         trades.append(_trade(
             pair, bars[i], bars[exit_idx], entry, exit_price,
@@ -286,6 +310,7 @@ def _simulate_trend_pullback(
             bars, i, direction=direction, entry=entry,
             risk_distance=risk_distance, target_r=target_r, max_hold=max_hold,
             params=p,
+            cost_bps=cost_bps,
         )
         trades.append(_trade(
             pair, bars[i], bars[exit_idx], entry, exit_price,
@@ -344,6 +369,7 @@ def _simulate_range_reversal(
             bars, i, direction=direction, entry=entry,
             risk_distance=risk_distance, target_r=target_r, max_hold=max_hold,
             params=p,
+            cost_bps=cost_bps,
         )
         trades.append(_trade(
             pair, bars[i], bars[exit_idx], entry, exit_price,
@@ -547,6 +573,8 @@ def evaluate_candidate(
             "stress_cost_multiplier": stress_multiplier,
             "cost_bps_per_side": cost_bps,
             "conservative_same_bar_stop_first": True,
+            "breakeven_cost_adjusted": True,
+            "breakeven_buffer_r": float(candidate.params.get("breakeven_buffer_r", 0.05)),
             "min_trades_per_day": float(min_trades_per_day),
             "preferred_trades_per_day": float(preferred_trades_per_day),
             "target_trades_per_day": float(target_trades_per_day),
