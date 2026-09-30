@@ -165,7 +165,11 @@ class PaperTradingEngine:
         }
 
     async def _discover(self) -> List[dict]:
-        promoted = await self.research_store.load_promoted(limit=100)
+        promoted = await self.research_store.load_promoted(
+            limit=100,
+            min_trades_per_day=self.settings.strategy_min_trades_per_day,
+        )
+        eligible_ids: set[str] = set()
         for row in promoted:
             strategy = str(row.get("strategy") or "")
             if strategy not in self.SUPPORTED:
@@ -187,8 +191,10 @@ class PaperTradingEngine:
 
             for params in variants:
                 variant_row = {**row, "params": params}
+                paper_id = _paper_id(variant_row)
+                eligible_ids.add(paper_id)
                 await self.store.ensure_strategy(
-                    paper_id=_paper_id(variant_row),
+                    paper_id=paper_id,
                     promoted_run_id=str(row.get("run_id") or ""),
                     strategy=strategy,
                     params=params,
@@ -200,8 +206,20 @@ class PaperTradingEngine:
                     ),
                     start_balance=float(self.settings.paper_start_balance),
                 )
+
         strategies = await self.store.list_strategies()
-        self.state.strategies = len(strategies)
+        for row in strategies:
+            paper_id = str(row.get("paper_id") or "")
+            status = str(row.get("status") or "")
+            if paper_id in eligible_ids and status == "frequency_rejected":
+                await self.store.set_status(paper_id, "active")
+                row["status"] = "active"
+            elif paper_id not in eligible_ids and status == "active":
+                await self.store.set_status(paper_id, "frequency_rejected")
+                row["status"] = "frequency_rejected"
+
+        active = [row for row in strategies if str(row.get("status") or "") == "active"]
+        self.state.strategies = len(active)
         return strategies
 
     async def _run(self) -> None:
@@ -217,13 +235,14 @@ class PaperTradingEngine:
                     else:
                         self.state.stage = "paper_trading"
                         self.state.message = (
-                            f"Paper trading {len(strategies)} frozen promoted "
-                            f"strateg{'y' if len(strategies)==1 else 'ies'} from €{self.settings.paper_start_balance:.0f}."
+                            f"Paper trading {self.state.strategies} eligible promoted "
+                            f"strateg{'y' if self.state.strategies==1 else 'ies'} from €{self.settings.paper_start_balance:.0f}; "
+                            f"hard minimum {self.settings.strategy_min_trades_per_day:g} trades/day."
                         )
                         for row in strategies:
                             if not self.state.running:
                                 break
-                            if str(row.get("status")) == "ruined":
+                            if str(row.get("status")) != "active":
                                 continue
                             try:
                                 await self._process_strategy(row)
