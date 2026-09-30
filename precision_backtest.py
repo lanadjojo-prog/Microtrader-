@@ -9,6 +9,7 @@ from statistics import mean
 from typing import Dict, List, Optional, Tuple
 
 from forex_metrics import strategy_metrics
+from market_filters import entry_allowed
 
 
 QuoteTick = Tuple[int, float, float]  # timestamp_ms, bid, ask
@@ -44,6 +45,9 @@ def candidate_grid() -> List[PrecisionCandidate]:
                 "stop_pips": stop_pips,
                 "target_pips": target_pips,
                 "risk_eur": 0.75,
+                "entry_sessions": "london_new_york",
+                "min_volume_ratio": 0.70,
+                "volume_window": 50,
                 "_phase": "precision_discovery",
             }
             out.extend([
@@ -310,14 +314,39 @@ def generate_signals(
     candidate: PrecisionCandidate, pair: str, bars: List[dict]
 ) -> List[dict]:
     if candidate.strategy == "liquidity_sweep_fvg":
-        return _liquidity_sweep_fvg_signals(candidate, pair, bars)
-    if candidate.strategy == "displacement_fvg_retrace":
-        return _displacement_fvg_signals(candidate, pair, bars)
-    if candidate.strategy == "session_sweep_reversal":
-        return _session_sweep_signals(candidate, pair, bars)
-    if candidate.strategy == "opening_range_retest":
-        return _opening_range_retest_signals(candidate, pair, bars)
-    raise ValueError(f"Unknown precision strategy: {candidate.strategy}")
+        raw = _liquidity_sweep_fvg_signals(candidate, pair, bars)
+    elif candidate.strategy == "displacement_fvg_retrace":
+        raw = _displacement_fvg_signals(candidate, pair, bars)
+    elif candidate.strategy == "session_sweep_reversal":
+        raw = _session_sweep_signals(candidate, pair, bars)
+    elif candidate.strategy == "opening_range_retest":
+        raw = _opening_range_retest_signals(candidate, pair, bars)
+    else:
+        raise ValueError(f"Unknown precision strategy: {candidate.strategy}")
+
+    # Global entry policy: only London/New York liquid hours and no entries
+    # after abnormally low completed-bar volume. Exits remain unrestricted.
+    index_by_time = {}
+    for idx, bar in enumerate(bars):
+        dt = _dt(bar.get("t"))
+        if dt:
+            index_by_time[dt] = idx
+
+    p = candidate.params
+    filtered: List[dict] = []
+    for signal in raw:
+        idx = index_by_time.get(signal.get("created_at"))
+        if idx is None:
+            continue
+        allowed, _, _ = entry_allowed(
+            bars,
+            idx,
+            min_volume_ratio=float(p.get("min_volume_ratio", 0.70)),
+            volume_window=int(p.get("volume_window", 50)),
+        )
+        if allowed:
+            filtered.append(signal)
+    return filtered
 
 
 def execute_signals(
@@ -618,6 +647,11 @@ def evaluate_candidate(
                 oos_metrics.get("avg_trades_per_day") or 0.0
             ),
             "frequency_requirement_met": frequency_ok,
+            "entry_sessions": "London 07:00-16:00 + New York 08:00-16:00 local time",
+            "session_dst_aware": True,
+            "min_relative_volume": float(candidate.params.get("min_volume_ratio", 0.70)),
+            "volume_window_bars": int(candidate.params.get("volume_window", 50)),
+            "entry_filter_uses_completed_volume_only": True,
         },
         "train": train_metrics,
         "oos": oos_metrics,
