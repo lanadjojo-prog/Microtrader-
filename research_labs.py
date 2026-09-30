@@ -9,10 +9,12 @@ from datetime import datetime, timedelta, timezone
 from statistics import mean, median
 from typing import Dict, List, Optional
 
-from alpaca_client import AlpacaClient
+from ctrader_client import CTraderClient
 from config import Settings
 from research_store import ResearchStore
+from forex_research_store import ForexResearchStore
 from strategy_lab import Candidate, candidate_signature, metrics, simulate
+from market_filters import active_session
 
 log = logging.getLogger("microtrader.research_labs")
 
@@ -38,7 +40,7 @@ LABS = [
 
 
 class ResearchLabs:
-    def __init__(self, settings: Settings, client: AlpacaClient):
+    def __init__(self, settings: Settings, client: CTraderClient):
         self.settings=settings
         self.client=client
         self.store=ResearchStore(settings.database_url)
@@ -48,6 +50,9 @@ class ResearchLabs:
 
     def public_state(self):
         p=asdict(self.state)
+        p["market"]="forex"
+        p["data_source"]="cTrader / Fusion demo"
+        p["pairs"]=list(self.settings.forex_pairs)
         p["labs"]={k:v for k,v in self._results.items()}
         return p
 
@@ -68,17 +73,22 @@ class ResearchLabs:
     async def _run(self):
         try:
             await self.store.init()
-            end=datetime.now(timezone.utc)
-            start=end-timedelta(days=max(120,self.settings.lab_lookback_days))
             bars_by_symbol={}
-            for symbol in self.settings.lab_symbols:
-                log.info("Research Labs loading data: %s", symbol)
-                bars=await self.client.historical_bars(symbol,start,end,self.settings.lab_timeframe,self.settings.lab_max_bars_per_symbol)
+            for pair in self.settings.forex_pairs:
+                log.info("Research Labs loading cTrader forex data: %s", pair)
+                bars=await self.client.historical_bars(
+                    pair,
+                    timeframe_min=1,
+                    max_bars=self.settings.forex_max_bars_per_pair,
+                    lookback_days=self.settings.forex_lookback_days,
+                )
                 if len(bars)>=300:
-                    bars_by_symbol[symbol]=bars
+                    bars_by_symbol[pair]=bars
+            if not bars_by_symbol:
+                raise RuntimeError("No usable cTrader forex data available for validation")
 
-            from strategy_store import StrategyStore
-            ss=StrategyStore(self.settings.database_url)
+            ss=ForexResearchStore(self.settings.database_url)
+            await ss.init()
             rows=await ss.load_results(limit=25)
             candidates=[]
             for row in rows:
@@ -88,8 +98,14 @@ class ResearchLabs:
                     avg_tpd = float((row.get("oos") or {}).get("avg_trades_per_day") or 0.0)
                     if tf not in (1, 5):
                         continue
+                    if str(params.get("market") or "") != "forex":
+                        continue
+                    if str(params.get("data_source") or "") != "ctrader":
+                        continue
                     if avg_tpd < float(self.settings.strategy_min_trades_per_day):
                         continue
+                    params["market"] = "forex"
+                    params["data_source"] = "ctrader"
                     params["entry_sessions"] = "london_new_york"
                     params["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
                     params["volume_window"] = self.settings.strategy_volume_window
@@ -97,7 +113,7 @@ class ResearchLabs:
                 except Exception:
                     continue
             if not candidates:
-                raise RuntimeError("No eligible 1m/5m Strategy Lab candidates meeting the hard trades/day rule yet")
+                raise RuntimeError("No eligible 1m/5m forex Research Lab candidates meeting the hard trades/day rule yet")
 
             # favor stronger candidates but still test multiple distinct configs
             seen=set(); uniq=[]
@@ -134,7 +150,7 @@ class ResearchLabs:
             self.state.completed_at=datetime.now(timezone.utc).isoformat()
 
     def _candidate_trades(self,c,bars_by_symbol,cost=None):
-        cost=self.settings.lab_cost_bps if cost is None else cost
+        cost=self.settings.forex_cost_bps if cost is None else cost
         out=[]
         for symbol,bars in bars_by_symbol.items():
             split=max(2,int(len(bars)*0.70))
@@ -156,23 +172,20 @@ class ResearchLabs:
         c=Candidate(best["strategy"],best["params"])
         for s,b in bars.items():
             split=int(len(b)*.7)
-            per[s]=metrics(simulate(c,s,b[split:],self.settings.lab_cost_bps))
+            per[s]=metrics(simulate(c,s,b[split:],self.settings.forex_cost_bps))
         return {"candidate":best["strategy"],"params":best["params"],"per_symbol":per}
 
     def _lab_session(self,candidates,bars):
         best=self._score_candidates(candidates,bars)[0]
-        buckets={"open":[],"midday":[],"close":[],"other":[]}
+        buckets={"London":[],"London+New York":[],"New York":[],"Outside entry window":[]}
         for t in best["trades"]:
-            try:
-                hour=datetime.fromisoformat(str(t["entry_time"]).replace("Z","+00:00")).hour
-            except Exception:
-                hour=-1
-            if 13<=hour<15: k="open"
-            elif 15<=hour<18: k="midday"
-            elif 18<=hour<21: k="close"
-            else: k="other"
-            buckets[k].append(t)
-        return {"candidate":best["strategy"],"sessions":{k:metrics(v) for k,v in buckets.items()}}
+            session=active_session(t.get("entry_time")) or "Outside entry window"
+            buckets.setdefault(session,[]).append(t)
+        return {
+            "candidate":best["strategy"],
+            "market":"forex",
+            "sessions":{k:metrics(v) for k,v in buckets.items()},
+        }
 
     def _lab_regime(self,candidates,bars):
         best=self._score_candidates(candidates,bars)[0]
@@ -180,7 +193,7 @@ class ResearchLabs:
         out={}
         for s,b in bars.items():
             n=len(b); chunks=[b[:n//3],b[n//3:2*n//3],b[2*n//3:]]
-            out[s]=[metrics(simulate(c,s,x,self.settings.lab_cost_bps)) for x in chunks if len(x)>50]
+            out[s]=[metrics(simulate(c,s,x,self.settings.forex_cost_bps)) for x in chunks if len(x)>50]
         return {"candidate":best["strategy"],"chronological_regimes":out}
 
     def _lab_high_frequency(self,candidates,bars):
@@ -204,7 +217,7 @@ class ResearchLabs:
                     chunk=b[a:z]
                     if len(chunk)<100: continue
                     split=int(len(chunk)*.7)
-                    tr.extend(simulate(c,s,chunk[split:],self.settings.lab_cost_bps))
+                    tr.extend(simulate(c,s,chunk[split:],self.settings.forex_cost_bps))
                 windows.append(metrics(tr))
             positive=sum(1 for m in windows if m["expectancy_bps"]>0 and m["profit_factor"]>=1)
             out.append({"strategy":c.strategy,"params":c.params,"positive_windows":positive,"windows":windows})
@@ -236,7 +249,7 @@ class ResearchLabs:
         best=self._score_candidates(candidates,bars)[0]
         c=Candidate(best["strategy"],best["params"])
         return {"strategy":c.strategy,"params":c.params,
-                "cost_scenarios":{str(x):metrics(self._candidate_trades(c,bars,self.settings.lab_cost_bps*x))
+                "cost_scenarios":{str(x):metrics(self._candidate_trades(c,bars,self.settings.forex_cost_bps*x))
                                   for x in (1.0,1.5,2.0,3.0)}}
 
     def _equity_stats(self,returns,fraction=1.0,leverage=1.0,start=50.0):
@@ -335,7 +348,9 @@ class ResearchLabs:
     def _lab_master(self,candidates,bars):
         ranked=self._score_candidates(candidates,bars)
         return {
-            "objective":"fast capital growth with explicit robustness and ruin controls",
+            "market":"forex",
+            "data_source":"cTrader / Fusion demo",
+            "objective":"fast capital growth from a small forex account with explicit robustness and ruin controls",
             "candidate_count":len(ranked),
             "best_by_profit_factor":{"strategy":ranked[0]["strategy"],"params":ranked[0]["params"],"metrics":ranked[0]["metrics"]} if ranked else None,
             "labs_completed":LABS[:-1],
