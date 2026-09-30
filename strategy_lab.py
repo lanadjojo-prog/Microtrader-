@@ -442,8 +442,12 @@ class StrategyLab:
                     }
                     await asyncio.sleep(0)
 
+                    # In continuous mode the promotion target is a milestone, not a
+                    # stop condition. Research must keep exploring/refining after the
+                    # first promoted candidates have been found.
                     if (
-                        self.settings.lab_target_promoted > 0
+                        not self.settings.lab_continuous
+                        and self.settings.lab_target_promoted > 0
                         and len(promoted) >= self.settings.lab_target_promoted
                     ):
                         self.state.stage = "target_reached"
