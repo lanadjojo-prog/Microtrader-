@@ -44,6 +44,40 @@ class ForexLabState:
     last_completed_at: Optional[str] = None
 
 
+def _clean_params(params: dict, phase: str) -> dict:
+    out = dict(params or {})
+    out["_phase"] = phase
+    return out
+
+
+def phase_candidates_from_results(results: List[dict]) -> List[ForexCandidate]:
+    """Rebuild next-stage work from append-only stored runs."""
+    queued: List[ForexCandidate] = []
+    seen_local: set[str] = set()
+    for row in results:
+        params = dict(row.get("params") or {})
+        strategy = str(row.get("strategy") or "")
+        status = str(row.get("status") or row.get("funnel_stage") or "")
+        if not strategy or status in {"rejected", "promoted"}:
+            continue
+        base_params = {k: v for k, v in params.items() if k != "_phase"}
+        next_phase = None
+        if status == "incubator":
+            next_phase = "incubator"
+        elif status == "deep_search":
+            next_phase = "deep_search"
+        if not next_phase:
+            continue
+        candidate = ForexCandidate(strategy, _clean_params(base_params, next_phase))
+        key = candidate_signature(candidate)
+        if key in seen_local:
+            continue
+        seen_local.add(key)
+        queued.append(candidate)
+    queued.sort(key=lambda c: 0 if c.params.get("_phase") == "deep_search" else 1)
+    return queued
+
+
 class ForexStrategyLab:
     """CPU-conscious forex strategy research.
 
@@ -159,7 +193,7 @@ class ForexStrategyLab:
             self.state.generation = int(saved.get("generation", 0))
             self.state.tested_total = int(saved.get("tested_total", 0))
             self.state.promoted_total = int(saved.get("promoted_total", 0))
-            self._results = await self.store.load_results(limit=250)
+            self._results = await self.store.load_results(limit=1000)
 
             source: Dict[str, List[dict]] = {}
             while self.state.running:
@@ -177,17 +211,31 @@ class ForexStrategyLab:
                         continue
 
                 seen = await self.store.load_signatures()
-                configured_candidates = [
-                    ForexCandidate(
-                        candidate.strategy,
-                        {**candidate.params, "risk_eur": self.settings.forex_risk_eur},
-                    )
-                    for candidate in candidate_grid()
-                ]
-                remaining = [
-                    candidate for candidate in configured_candidates
-                    if evaluation_signature(candidate, source) not in seen
-                ]
+                self._results = await self.store.load_results(limit=1000)
+
+                advanced = phase_candidates_from_results(self._results)
+                discovery: List[ForexCandidate] = []
+                for candidate in candidate_grid():
+                    base = {**candidate.params}
+                    for risk_eur in (2.0, 3.0):
+                        discovery.append(
+                            ForexCandidate(
+                                candidate.strategy,
+                                {**base, "risk_eur": risk_eur, "_phase": "discovery"},
+                            )
+                        )
+
+                # Resume Deep Search / Incubator first after a restart.
+                ordered = advanced + discovery
+                remaining = []
+                candidate_seen: set[str] = set()
+                for candidate in ordered:
+                    sig = evaluation_signature(candidate, source)
+                    local_key = candidate_signature(candidate)
+                    if sig in seen or local_key in candidate_seen:
+                        continue
+                    candidate_seen.add(local_key)
+                    remaining.append(candidate)
 
                 if not remaining:
                     self.state.stage = "waiting_new_data"
@@ -220,8 +268,10 @@ class ForexStrategyLab:
                     self.state.current_candidate = candidate.strategy
                     self.state.current_params = dict(candidate.params)
                     self.state.message = (
-                        f"Testing {idx}/{len(batch)} · {candidate.strategy} · "
-                        f"{tf}m · target {candidate.params.get('target_r')}R"
+                        f"{str(candidate.params.get('_phase', 'discovery')).replace('_', ' ').title()} "
+                        f"{idx}/{len(batch)} · {candidate.strategy} · "
+                        f"{tf}m · target {candidate.params.get('target_r')}R · "
+                        f"risk €{candidate.params.get('risk_eur')}"
                     )
 
                     result = await asyncio.to_thread(
