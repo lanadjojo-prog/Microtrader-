@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from forex_metrics import strategy_metrics
 from market_filters import entry_allowed
 
-PRECISION_EVALUATION_POLICY_VERSION = "precision-v2-policy-fingerprint"
+PRECISION_EVALUATION_POLICY_VERSION = "precision-v3-qualified-tick-validation"
 
 
 QuoteTick = Tuple[int, float, float]  # timestamp_ms, bid, ask
@@ -601,10 +601,13 @@ def evaluate_candidate(
     score += min(10.0, max(0.0, avg_fill / 10.0))
     score = round(min(100.0, score), 2)
 
+    # Precision is an execution-validation layer, not a second statistical
+    # search funnel. A clean pass is therefore called "qualified" rather than
+    # "deep search"; the 70/30 chronology and bid/ask ticks are the validation.
     if not frequency_ok:
         stage = "rejected"
     elif not reasons:
-        stage = "precision_deep_search"
+        stage = "precision_qualified"
     elif (
         oos_metrics["trades"] >= 15
         and oos_metrics["expectancy_r"] > 0
@@ -670,6 +673,11 @@ def evaluate_candidate(
             "min_relative_volume": float(candidate.params.get("min_volume_ratio", 0.70)),
             "volume_window_bars": int(candidate.params.get("volume_window", 50)),
             "entry_filter_uses_completed_volume_only": True,
+            "stage_semantics": (
+                "precision_qualified means this configuration passed the current "
+                "chronological tick-execution validation; it is not a separate "
+                "Deep Search phase"
+            ),
         },
         "train": train_metrics,
         "oos": oos_metrics,
