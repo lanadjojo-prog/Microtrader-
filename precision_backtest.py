@@ -491,7 +491,9 @@ def evaluate_candidate(
     stress_multiplier: float = 2.0,
     min_oos_trades: int = 40,
     min_profit_factor: float = 1.20,
-    min_trades_per_day: float = 10.0,
+    min_trades_per_day: float = 3.0,
+    preferred_trades_per_day: float = 5.0,
+    target_trades_per_day: float = 10.0,
     start_capital: float = 50.0,
 ) -> dict:
     train_trades: List[dict] = []
@@ -583,10 +585,19 @@ def evaluate_candidate(
     score += min(30.0, max(0.0, oos_metrics["expectancy_r"] * 30.0))
     score += min(25.0, max(0.0, (oos_metrics["profit_factor"] - 1.0) * 25.0))
     score += 15.0 * min(1.0, positive_pair_ratio)
-    score += 10.0 * min(1.0, oos_metrics["trades"] / max(1, min_oos_trades))
+    score += 5.0 * min(1.0, oos_metrics["trades"] / max(1, min_oos_trades))
+    avg_tpd = float(oos_metrics.get("avg_trades_per_day") or 0.0)
+    if avg_tpd >= preferred_trades_per_day:
+        span = max(0.1, target_trades_per_day - preferred_trades_per_day)
+        frequency_bonus = 2.5 + 2.5 * min(
+            1.0, max(0.0, (avg_tpd - preferred_trades_per_day) / span)
+        )
+    else:
+        frequency_bonus = 0.0
+    score += frequency_bonus
     score += min(10.0, max(0.0, stress_metrics["expectancy_r"] * 10.0))
     score += min(10.0, max(0.0, avg_fill / 10.0))
-    score = round(score, 2)
+    score = round(min(100.0, score), 2)
 
     if not frequency_ok:
         stage = "rejected"
@@ -643,6 +654,9 @@ def evaluate_candidate(
             "stress_commission_multiplier": stress_multiplier,
             "one_position_per_pair": True,
             "min_trades_per_day": float(min_trades_per_day),
+            "preferred_trades_per_day": float(preferred_trades_per_day),
+            "target_trades_per_day": float(target_trades_per_day),
+            "frequency_score_bonus": round(float(frequency_bonus), 3),
             "observed_oos_avg_trades_per_day": float(
                 oos_metrics.get("avg_trades_per_day") or 0.0
             ),
