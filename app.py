@@ -71,6 +71,20 @@ async def autostart():
     if settings.forex_lab_auto_start: await forex_lab.start()
     if settings.precision_lab_auto_start: await precision_lab.start()
     if settings.paper_trading_auto_start: await paper_engine.start()
+    logging.getLogger("microtrader").info(
+        "WORKERS research=%s agent=%s coordinator=%s forex=%s precision=%s paper=%s "
+        "research_stage=%s forex_stage=%s precision_stage=%s paper_stage=%s",
+        strategy_lab.state.running,
+        research_agent.state.running,
+        research_coordinator.state.running,
+        forex_lab.state.running,
+        precision_lab.state.running,
+        paper_engine.state.running,
+        strategy_lab.state.stage,
+        forex_lab.state.stage,
+        precision_lab.state.stage,
+        paper_engine.state.stage,
+    )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
