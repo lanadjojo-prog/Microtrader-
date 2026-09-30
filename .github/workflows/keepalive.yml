@@ -1,0 +1,16 @@
+name: Keep ForexTrader awake
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render health endpoint
+        run: curl --fail --silent --show-error --retry 3 --max-time 30 https://microtrader-6thu.onrender.com/health
