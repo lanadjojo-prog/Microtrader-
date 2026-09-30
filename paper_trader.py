@@ -94,6 +94,24 @@ def _exit_management(
     return float(trigger_r), cost_r + float(desired_net_r)
 
 
+def _max_loss_stop_price(
+    *,
+    entry: float,
+    risk_distance: float,
+    direction: int,
+    cost_bps: float,
+    max_loss_r: float = 1.0,
+) -> float:
+    """Price that limits NET modeled loss to max_loss_r after round-trip costs."""
+    if entry <= 0 or risk_distance <= 0 or direction not in (-1, 1):
+        return entry
+    risk_pct = risk_distance / entry
+    roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
+    desired_net = -abs(float(max_loss_r)) * risk_pct
+    signed_gross = desired_net + roundtrip_cost_pct
+    return entry * (1.0 + signed_gross / float(direction))
+
+
 def _rolling_vwap(bars: List[dict], a: int, b: int) -> float:
     sample = bars[a:b]
     if not sample:
@@ -698,12 +716,18 @@ class PaperTradingEngine:
                         risk_distance = float(decision["risk_distance"])
                         target_r = float(params.get("target_r", 2.0))
                         risk_eur = float(params.get("risk_eur", 2.0))
-                        if direction > 0:
-                            stop = entry - risk_distance
-                            target = entry + risk_distance * target_r
-                        else:
-                            stop = entry + risk_distance
-                            target = entry - risk_distance * target_r
+                        stop = _max_loss_stop_price(
+                            entry=entry,
+                            risk_distance=risk_distance,
+                            direction=direction,
+                            cost_bps=float(self.settings.forex_cost_bps),
+                            max_loss_r=1.0,
+                        )
+                        target = (
+                            entry + risk_distance * target_r
+                            if direction > 0
+                            else entry - risk_distance * target_r
+                        )
                         new_pos = {
                             **decision,
                             "stop_price": stop,
@@ -795,10 +819,28 @@ class PaperTradingEngine:
     ) -> bool:
         direction = int(pos["direction"])
         source = str(params.get("_paper_source") or "forex")
+        low, high = float(bar["l"]), float(bar["h"])
 
-        # Research-native families are papered with the same logical exit
-        # family as Research Lab: momentum/mean-reversion signal exits and
-        # otherwise max-hold. ATR is only the 1R sizing/accounting unit here.
+        # Hard risk comes first for every paper strategy. This also repairs
+        # positions opened by older builds whose stored stop did not reserve
+        # modeled round-trip costs inside the 1R budget.
+        hard_stop = _max_loss_stop_price(
+            entry=float(pos["entry_price"]),
+            risk_distance=float(pos["risk_distance"]),
+            direction=direction,
+            cost_bps=float(self.settings.forex_cost_bps),
+            max_loss_r=1.0,
+        )
+        stored_stop = float(pos["stop_price"])
+        stop = max(stored_stop, hard_stop) if direction > 0 else min(stored_stop, hard_stop)
+        if direction > 0 and low <= stop:
+            await self._close(paper_id, pair, pos, bar, stop, "stop")
+            return True
+        if direction < 0 and high >= stop:
+            await self._close(paper_id, pair, pos, bar, stop, "stop")
+            return True
+
+        # Research-native signal/max-hold exits are secondary to the 1R stop.
         if source == "research" and strategy != "asymmetric_breakout":
             reason = _research_exit_reason(
                 strategy, params, bars, index, direction
@@ -816,14 +858,7 @@ class PaperTradingEngine:
                 return True
             return False
 
-        low, high = float(bar["l"]), float(bar["h"])
-        stop, target = float(pos["stop_price"]), float(pos["target_price"])
-        if direction > 0 and low <= stop:
-            await self._close(paper_id, pair, pos, bar, stop, "stop")
-            return True
-        if direction < 0 and high >= stop:
-            await self._close(paper_id, pair, pos, bar, stop, "stop")
-            return True
+        target = float(pos["target_price"])
         if direction > 0 and high >= target:
             await self._close(paper_id, pair, pos, bar, target, "target")
             return True
@@ -857,6 +892,27 @@ class PaperTradingEngine:
         net = gross - (2.0 * float(self.settings.forex_cost_bps) / 10_000.0)
         risk_pct = risk_distance / entry if entry > 0 else 0.0
         r_multiple = net / risk_pct if risk_pct > 0 else 0.0
+
+        # Data-integrity backstop: paper execution may model a tiny amount of
+        # adverse slippage, but never an unbounded multi-R loss. Normal stops
+        # are cost-adjusted to -1.00R; this 1.05R cap is only a final guard.
+        if r_multiple < -1.05:
+            capped_price = _max_loss_stop_price(
+                entry=entry,
+                risk_distance=risk_distance,
+                direction=direction,
+                cost_bps=float(self.settings.forex_cost_bps),
+                max_loss_r=1.05,
+            )
+            log.warning(
+                "Paper loss guard applied: paper_id=%s pair=%s reason=%s raw_r=%.4f capped_r=-1.05",
+                paper_id, pair, reason, r_multiple,
+            )
+            exit_price = capped_price
+            gross = direction * ((float(exit_price) / entry) - 1.0)
+            net = gross - (2.0 * float(self.settings.forex_cost_bps) / 10_000.0)
+            r_multiple = net / risk_pct if risk_pct > 0 else -1.05
+
         risk_eur = float(pos["risk_eur"])
         pnl = r_multiple * risk_eur
         await self.store.record_trade(
