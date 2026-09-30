@@ -227,6 +227,7 @@ class StrategyLab:
                 and str((row.get("params") or {}).get("entry_sessions") or "") == "london_new_york"
                 and str((row.get("params") or {}).get("market") or "") == "forex"
                 and str((row.get("params") or {}).get("data_source") or "") == "ctrader"
+                and str((row.get("params") or {}).get("direction_mode") or "") == "long_short"
             ]
             persisted_signatures = await self.store.load_signatures()
             persisted_state = await self.store.load_state()
@@ -455,7 +456,7 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
-RESEARCH_POLICY_VERSION = "forex-ctrader-v1-frequency-v2-min3-preferred5-target10-portfolio10"
+RESEARCH_POLICY_VERSION = "forex-ctrader-v2-long-short-frequency-v2-min3-preferred5-target10-portfolio10"
 
 def candidate_signature(candidate: Candidate) -> str:
     import json
@@ -469,7 +470,7 @@ def candidate_signature(candidate: Candidate) -> str:
 def discovery_candidates() -> List[Candidate]:
     out: List[Candidate] = []
     for tf in (1, 5):
-        common = {"timeframe_min": tf, "_phase": "discovery", "market": "forex", "data_source": "ctrader", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50}
+        common = {"timeframe_min": tf, "_phase": "discovery", "market": "forex", "data_source": "ctrader", "direction_mode": "long_short", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50}
         out.extend([
             Candidate("momentum", {**common, "fast": 4, "slow": 16, "entry_bps": 8.0, "max_hold": 16}),
             Candidate("mean_reversion", {**common, "window": 20, "z_entry": 1.5, "z_exit": 0.25, "max_hold": 20}),
@@ -515,7 +516,7 @@ def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candi
         and not isinstance(v, bool)
         and k not in {
             "timeframe_min", "target_r", "min_volume_ratio", "volume_window",
-            "risk_eur", "start_capital_eur",
+            "risk_eur", "start_capital_eur", "direction_mode",
         }
     ][:4]
 
@@ -630,7 +631,7 @@ def choose_batch(
                 "max_hold": 30 + 5*wave + 2*epoch}),
         ]
         for cand in broad:
-            cand = Candidate(cand.strategy, {**cand.params, "market": "forex", "data_source": "ctrader", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50})
+            cand = Candidate(cand.strategy, {**cand.params, "market": "forex", "data_source": "ctrader", "direction_mode": "long_short", "entry_sessions": "london_new_york", "min_volume_ratio": 0.70, "volume_window": 50})
             sig = candidate_signature(cand)
             if sig not in seen and sig not in local:
                 local.add(sig)
@@ -864,12 +865,16 @@ def _simulate_momentum(
     i = slow
 
     while i < len(bars) - 1:
-        if not _entry_ok(p, bars, i): i += 1; continue
+        if not _entry_ok(p, bars, i):
+            i += 1
+            continue
         history = [float(x["c"]) for x in bars[i - slow:i]]
         fast_ma = mean(history[-int(p["fast"]):])
         slow_ma = mean(history)
         edge_bps = ((fast_ma / slow_ma) - 1.0) * 10_000 if slow_ma else 0.0
-        if edge_bps < float(p["entry_bps"]):
+        threshold = float(p["entry_bps"])
+        direction = 1 if edge_bps >= threshold else (-1 if edge_bps <= -threshold else 0)
+        if not direction:
             i += 1
             continue
 
@@ -883,15 +888,18 @@ def _simulate_momentum(
                 continue
             f = mean(trailing[-int(p["fast"]):])
             s = mean(trailing)
-            if s and ((f / s) - 1.0) * 10_000 <= 0:
+            edge = ((f / s) - 1.0) * 10_000 if s else 0.0
+            if (direction > 0 and edge <= 0) or (direction < 0 and edge >= 0):
                 exit_idx = j
                 break
 
         exit_price = float(bars[exit_idx]["o"])
-        trades.append(_trade(symbol, bars[entry_idx], bars[exit_idx], entry_price, exit_price, cost_bps))
+        trades.append(_trade(
+            symbol, bars[entry_idx], bars[exit_idx],
+            entry_price, exit_price, cost_bps, direction=direction
+        ))
         i = exit_idx + 1
     return trades
-
 
 def _simulate_mean_reversion(
     candidate: Candidate,
@@ -905,7 +913,9 @@ def _simulate_mean_reversion(
     i = window
 
     while i < len(bars) - 1:
-        if not _entry_ok(p, bars, i): i += 1; continue
+        if not _entry_ok(p, bars, i):
+            i += 1
+            continue
         history = [float(x["c"]) for x in bars[i - window:i]]
         mu = mean(history)
         sigma = pstdev(history)
@@ -913,7 +923,9 @@ def _simulate_mean_reversion(
             i += 1
             continue
         z = (float(bars[i - 1]["c"]) - mu) / sigma
-        if z > -float(p["z_entry"]):
+        z_entry = float(p["z_entry"])
+        direction = 1 if z <= -z_entry else (-1 if z >= z_entry else 0)
+        if not direction:
             i += 1
             continue
 
@@ -930,16 +942,18 @@ def _simulate_mean_reversion(
             if sigma_j <= 0:
                 continue
             z_j = (float(bars[j - 1]["c"]) - mu_j) / sigma_j
-            if z_j >= -float(p["z_exit"]):
+            z_exit = float(p["z_exit"])
+            if (direction > 0 and z_j >= -z_exit) or (direction < 0 and z_j <= z_exit):
                 exit_idx = j
                 break
 
         exit_price = float(bars[exit_idx]["o"])
-        trades.append(_trade(symbol, bars[entry_idx], bars[exit_idx], entry_price, exit_price, cost_bps))
+        trades.append(_trade(
+            symbol, bars[entry_idx], bars[exit_idx],
+            entry_price, exit_price, cost_bps, direction=direction
+        ))
         i = exit_idx + 1
     return trades
-
-
 
 def _entry_ok(params: dict, bars: List[dict], i: int) -> bool:
     allowed, _, _ = entry_allowed(
@@ -964,12 +978,16 @@ def _simulate_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost
     p=candidate.params; w=int(p["window"]); trades=[]; i=w
     while i < len(bars)-1:
         if not _entry_ok(p, bars, i): i+=1; continue
-        level=max(float(x["h"]) for x in bars[i-w:i])*(1+float(p.get("buffer_bps",0))/10000)
-        if float(bars[i-1]["c"]) <= level: i+=1; continue
+        prior=bars[i-w:i]
+        buf=float(p.get("buffer_bps",0))/10000
+        high_level=max(float(x["h"]) for x in prior)*(1+buf)
+        low_level=min(float(x["l"]) for x in prior)*(1-buf)
+        px=float(bars[i-1]["c"])
+        direction=1 if px>high_level else (-1 if px<low_level else 0)
+        if not direction: i+=1; continue
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
-        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps)); i=x+1
+        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps,direction=direction)); i=x+1
     return trades
-
 
 def _simulate_extreme_reversal(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=w+1
@@ -977,11 +995,13 @@ def _simulate_extreme_reversal(candidate: Candidate, symbol: str, bars: List[dic
         if not _entry_ok(p, bars, i): i+=1; continue
         rets=[float(bars[j]["c"])/float(bars[j-1]["c"])-1 for j in range(i-w,i)]
         sd=pstdev(rets) if len(rets)>1 else 0.0
-        if sd<=0 or rets[-1] > -float(p["shock_z"])*sd: i+=1; continue
+        if sd<=0: i+=1; continue
+        threshold=float(p["shock_z"])*sd
+        direction=1 if rets[-1] <= -threshold else (-1 if rets[-1] >= threshold else 0)
+        if not direction: i+=1; continue
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
-        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps)); i=x+1
+        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps,direction=direction)); i=x+1
     return trades
-
 
 def _simulate_volatility_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=w+1
@@ -989,12 +1009,13 @@ def _simulate_volatility_breakout(candidate: Candidate, symbol: str, bars: List[
         if not _entry_ok(p, bars, i): i+=1; continue
         ranges=[float(x["h"])-float(x["l"]) for x in bars[i-w:i]]
         cur=float(bars[i-1]["h"])-float(bars[i-1]["l"])
-        bullish=float(bars[i-1]["c"])>float(bars[i-1]["o"])
-        if mean(ranges)<=0 or cur < mean(ranges)*float(p["vol_mult"]) or not bullish: i+=1; continue
+        if mean(ranges)<=0 or cur < mean(ranges)*float(p["vol_mult"]): i+=1; continue
+        o=float(bars[i-1]["o"]); cl=float(bars[i-1]["c"])
+        direction=1 if cl>o else (-1 if cl<o else 0)
+        if not direction: i+=1; continue
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
-        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps)); i=x+1
+        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps,direction=direction)); i=x+1
     return trades
-
 
 def _simulate_trend_pullback(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; slow=int(p["slow"]); fast=int(p["fast"]); trades=[]; i=slow
@@ -1003,11 +1024,12 @@ def _simulate_trend_pullback(candidate: Candidate, symbol: str, bars: List[dict]
         closes=[float(x["c"]) for x in bars[i-slow:i]]
         f=mean(closes[-fast:]); s=mean(closes); sd=pstdev(closes)
         z=(closes[-1]-f)/sd if sd>0 else 0
-        if f<=s or z > -float(p["pullback_z"]): i+=1; continue
+        threshold=float(p["pullback_z"])
+        direction=1 if (f>s and z<=-threshold) else (-1 if (f<s and z>=threshold) else 0)
+        if not direction: i+=1; continue
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
-        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps)); i=x+1
+        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps,direction=direction)); i=x+1
     return trades
-
 
 def _rolling_vwap(bars: List[dict], a: int, b: int) -> float:
     pv=0.0; vol=0.0
@@ -1023,44 +1045,55 @@ def _simulate_vwap_reversion(candidate: Candidate, symbol: str, bars: List[dict]
         if not _entry_ok(p, bars, i): i+=1; continue
         vw=_rolling_vwap(bars,i-w,i); closes=[float(x["c"]) for x in bars[i-w:i]]; sd=pstdev(closes)
         z=(closes[-1]-vw)/sd if sd>0 else 0
-        if z > -float(p["z_entry"]): i+=1; continue
+        threshold=float(p["z_entry"])
+        direction=1 if z<=-threshold else (-1 if z>=threshold else 0)
+        if not direction: i+=1; continue
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
-        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps)); i=x+1
+        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps,direction=direction)); i=x+1
     return trades
-
 
 def _simulate_vwap_momentum(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=w
     while i < len(bars)-1:
         if not _entry_ok(p, bars, i): i+=1; continue
         vw=_rolling_vwap(bars,i-w,i); px=float(bars[i-1]["c"])
-        if vw<=0 or ((px/vw)-1)*10000 < float(p["buffer_bps"]): i+=1; continue
+        edge=((px/vw)-1)*10000 if vw>0 else 0.0
+        threshold=float(p["buffer_bps"])
+        direction=1 if edge>=threshold else (-1 if edge<=-threshold else 0)
+        if not direction: i+=1; continue
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
-        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps)); i=x+1
+        trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps,direction=direction)); i=x+1
     return trades
-
 
 def _simulate_asymmetric_breakout(candidate: Candidate, symbol: str, bars: List[dict], cost_bps: float) -> List[dict]:
     p=candidate.params; w=int(p["window"]); trades=[]; i=max(w,15)
     while i < len(bars)-2:
         if not _entry_ok(p, bars, i): i+=1; continue
-        prior=max(float(x["h"]) for x in bars[i-w:i])
-        if float(bars[i-1]["c"]) <= prior: i+=1; continue
+        prior=bars[i-w:i]
+        prev=float(bars[i-1]["c"])
+        high_break=max(float(x["h"]) for x in prior)
+        low_break=min(float(x["l"]) for x in prior)
+        direction=1 if prev>high_break else (-1 if prev<low_break else 0)
+        if not direction: i+=1; continue
         entry=float(bars[i]["o"]); atr=_atr(bars,i,14)
         if atr<=0: i+=1; continue
-        risk=atr*float(p["stop_atr"]); stop=entry-risk; target=entry+risk*float(p["target_r"])
+        risk=atr*float(p["stop_atr"])
+        target_r=float(p["target_r"])
+        stop=entry-risk if direction>0 else entry+risk
+        target=entry+risk*target_r if direction>0 else entry-risk*target_r
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1); exit_price=float(bars[x]["o"]); r_mult=None
         for j in range(e,x+1):
             lo=float(bars[j]["l"]); hi=float(bars[j]["h"])
-            if lo<=stop:
+            stop_hit=(lo<=stop) if direction>0 else (hi>=stop)
+            target_hit=(hi>=target) if direction>0 else (lo<=target)
+            if stop_hit:
                 exit_price=stop; x=j; r_mult=-1.0; break
-            if hi>=target:
-                exit_price=target; x=j; r_mult=float(p["target_r"]); break
+            if target_hit:
+                exit_price=target; x=j; r_mult=target_r; break
         if r_mult is None:
-            r_mult=(exit_price-entry)/risk if risk>0 else 0.0
-        trades.append(_trade(symbol,bars[e],bars[x],entry,exit_price,cost_bps,r_mult)); i=x+1
+            r_mult=direction*(exit_price-entry)/risk if risk>0 else 0.0
+        trades.append(_trade(symbol,bars[e],bars[x],entry,exit_price,cost_bps,r_mult,direction=direction)); i=x+1
     return trades
-
 
 def _trade(
     symbol: str,
@@ -1070,11 +1103,15 @@ def _trade(
     exit_price: float,
     cost_bps: float,
     r_multiple: Optional[float] = None,
+    direction: int = 1,
 ) -> dict:
-    gross = (exit_price / entry_price) - 1.0 if entry_price else 0.0
+    gross = direction * ((exit_price / entry_price) - 1.0) if entry_price else 0.0
     net = gross - (2.0 * cost_bps / 10_000.0)
     return {
         "symbol": symbol,
+        "pair": symbol,
+        "side": "long" if direction > 0 else "short",
+        "direction": direction,
         "entry_time": entry_bar.get("t"),
         "exit_time": exit_bar.get("t"),
         "gross_return": gross,
