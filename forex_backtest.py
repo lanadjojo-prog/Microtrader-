@@ -353,6 +353,7 @@ def evaluate_candidate(
     min_oos_trades: int = 80,
     min_profit_factor: float = 1.25,
     min_payoff_ratio: float = 1.8,
+    min_trades_per_day: float = 10.0,
     start_capital: float = 50.0,
 ) -> dict:
     train_trades: List[dict] = []
@@ -397,6 +398,11 @@ def evaluate_candidate(
     )
 
     reasons: List[str] = []
+    frequency_ok = float(oos_metrics.get("avg_trades_per_day") or 0.0) >= float(min_trades_per_day)
+    if not frequency_ok:
+        reasons.append(
+            f"average trades/day below hard minimum {float(min_trades_per_day):g}"
+        )
     if oos_metrics["trades"] < min_oos_trades:
         reasons.append(f"fewer than {min_oos_trades} OOS trades")
     if oos_metrics["expectancy_r"] <= 0:
@@ -427,15 +433,18 @@ def evaluate_candidate(
     raw_pass = not reasons
     phase = str(candidate.params.get("_phase", "discovery"))
     discovery_ok = (
-        oos_metrics["trades"] >= 20
+        frequency_ok
+        and oos_metrics["trades"] >= 20
         and oos_metrics["expectancy_r"] > 0
         and oos_metrics["profit_factor"] >= 1.05
     )
-    strong_ok = raw_pass or score >= 70
+    strong_ok = frequency_ok and (raw_pass or score >= 70)
 
-    # Sequential funnel: Discovery -> Incubator -> Deep Search -> Promoted.
+    # Hard gate: frequency can never be overridden by a high score.
     promoted = False
-    if phase == "deep_search":
+    if not frequency_ok:
+        stage = "rejected"
+    elif phase == "deep_search":
         if raw_pass:
             stage = "promoted"
             promoted = True
@@ -481,6 +490,11 @@ def evaluate_candidate(
             "stress_cost_multiplier": stress_multiplier,
             "cost_bps_per_side": cost_bps,
             "conservative_same_bar_stop_first": True,
+            "min_trades_per_day": float(min_trades_per_day),
+            "observed_oos_avg_trades_per_day": float(
+                oos_metrics.get("avg_trades_per_day") or 0.0
+            ),
+            "frequency_requirement_met": frequency_ok,
         },
         "promoted": promoted,
         "rejection_reasons": reasons,
