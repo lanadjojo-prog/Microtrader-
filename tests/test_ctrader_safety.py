@@ -48,6 +48,11 @@ class CTraderSafetyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CTraderError):
             _ = client.endpoint
 
+    def test_legacy_stock_execution_is_hard_disabled(self):
+        self.assertFalse(
+            Settings(paper=True, live_trading_enabled=True).can_trade
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
