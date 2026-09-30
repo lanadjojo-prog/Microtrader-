@@ -83,7 +83,7 @@ class Settings:
     forex_lookback_days: int = _int("FOREX_LOOKBACK_DAYS", 120)
     forex_max_bars_per_pair: int = _int("FOREX_MAX_BARS_PER_PAIR", 30000)
     forex_lab_batch_size: int = _int("FOREX_LAB_BATCH_SIZE", 12)
-    forex_min_oos_trades: int = _int("FOREX_MIN_OOS_TRADES", 60)
+    forex_min_oos_trades: int = _int("FOREX_MIN_OOS_TRADES", 20)
     forex_min_profit_factor: float = _float("FOREX_MIN_PROFIT_FACTOR", 1.25)
     forex_min_payoff_ratio: float = _float("FOREX_MIN_PAYOFF_RATIO", 1.80)
     forex_max_retail_leverage: float = _float("FOREX_MAX_RETAIL_LEVERAGE", 30.0)
@@ -127,7 +127,7 @@ class Settings:
     precision_risk_eur: float = _float("PRECISION_RISK_EUR", 0.75)
     precision_commission_pips: float = _float("PRECISION_COMMISSION_PIPS", 0.50)
     precision_stress_multiplier: float = _float("PRECISION_STRESS_MULTIPLIER", 2.0)
-    precision_min_oos_trades: int = _int("PRECISION_MIN_OOS_TRADES", 40)
+    precision_min_oos_trades: int = _int("PRECISION_MIN_OOS_TRADES", 12)
     precision_min_profit_factor: float = _float("PRECISION_MIN_PROFIT_FACTOR", 1.20)
 
     # Forward paper trading for promoted Forex strategies.
