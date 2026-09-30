@@ -86,6 +86,9 @@ class StrategyLab:
         payload["summary"] = self._summary
         payload["allowed_timeframes_min"] = [1, 5]
         payload["min_trades_per_day"] = self.settings.strategy_min_trades_per_day
+        payload["preferred_trades_per_day"] = self.settings.strategy_preferred_trades_per_day
+        payload["target_trades_per_day"] = self.settings.strategy_target_trades_per_day
+        payload["portfolio_min_trades_per_day"] = self.settings.portfolio_min_trades_per_day
         payload["entry_sessions"] = ["London", "New York"]
         payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
         return payload
@@ -326,6 +329,8 @@ class StrategyLab:
                         self.settings.lab_min_positive_symbol_ratio,
                         symbol_progress,
                         min_trades_per_day=self.settings.strategy_min_trades_per_day,
+                        preferred_trades_per_day=self.settings.strategy_preferred_trades_per_day,
+                        target_trades_per_day=self.settings.strategy_target_trades_per_day,
                     )
                     elapsed = (datetime.now(timezone.utc) - started_candidate).total_seconds()
                     self.state.candidate_seconds = round(elapsed, 2)
@@ -443,9 +448,15 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
+RESEARCH_POLICY_VERSION = "frequency-v2-min3-preferred5-target10-portfolio10"
+
 def candidate_signature(candidate: Candidate) -> str:
     import json
-    return candidate.strategy + ":" + json.dumps(candidate.params, sort_keys=True, separators=(",", ":"))
+    return (
+        candidate.strategy + ":" +
+        json.dumps(candidate.params, sort_keys=True, separators=(",", ":")) +
+        ":" + RESEARCH_POLICY_VERSION
+    )
 
 
 def discovery_candidates() -> List[Candidate]:
@@ -659,7 +670,9 @@ def evaluate_candidate(
     max_drawdown_pct: float = 6.0,
     min_positive_symbol_ratio: float = 0.60,
     progress_callback=None,
-    min_trades_per_day: float = 10.0,
+    min_trades_per_day: float = 3.0,
+    preferred_trades_per_day: float = 5.0,
+    target_trades_per_day: float = 10.0,
 ) -> dict:
     train_trades: List[dict] = []
     oos_trades: List[dict] = []
@@ -726,7 +739,14 @@ def evaluate_candidate(
     promoted = raw_pass and candidate_phase == "deep_search"
     if raw_pass and not promoted:
         reasons.append("passes current filters; requires deep-search full-history confirmation")
-    score = funnel_score(oos_metrics, stress_metrics, positive_symbol_ratio, min_oos_trades)
+    score = funnel_score(
+        oos_metrics,
+        stress_metrics,
+        positive_symbol_ratio,
+        min_oos_trades,
+        preferred_trades_per_day,
+        target_trades_per_day,
+    )
     if not hard_frequency_pass:
         funnel_stage = "rejected"
     elif promoted:
@@ -763,16 +783,36 @@ def evaluate_candidate(
         "positive_symbols": positive_symbols,
         "symbol_count": len(per_symbol),
         "per_symbol": per_symbol,
+        "frequency_policy": {
+            "hard_min_trades_per_day": float(min_trades_per_day),
+            "preferred_from_trades_per_day": float(preferred_trades_per_day),
+            "target_trades_per_day": float(target_trades_per_day),
+        },
     }
 
 
-def funnel_score(oos: dict, stress: dict, positive_ratio: float, min_trades: int) -> float:
+def funnel_score(
+    oos: dict,
+    stress: dict,
+    positive_ratio: float,
+    min_trades: int,
+    preferred_trades_per_day: float = 5.0,
+    target_trades_per_day: float = 10.0,
+) -> float:
     exp = max(0.0, min(35.0, 17.5 + float(oos.get("expectancy_bps", 0))))
     pf = min(25.0, max(0.0, (float(oos.get("profit_factor", 0)) - 0.8) * 25.0))
     stress_score = min(15.0, max(0.0, 7.5 + float(stress.get("expectancy_bps", 0))))
     robustness = 15.0 * max(0.0, min(1.0, positive_ratio))
-    trades = 10.0 * min(1.0, float(oos.get("trades", 0)) / max(1, min_trades))
-    return round(exp + pf + stress_score + robustness + trades, 2)
+    trade_sample = 5.0 * min(1.0, float(oos.get("trades", 0)) / max(1, min_trades))
+    avg_tpd = float(oos.get("avg_trades_per_day") or 0.0)
+    if avg_tpd >= preferred_trades_per_day:
+        span = max(0.1, target_trades_per_day - preferred_trades_per_day)
+        frequency_bonus = 2.5 + 2.5 * min(
+            1.0, max(0.0, (avg_tpd - preferred_trades_per_day) / span)
+        )
+    else:
+        frequency_bonus = 0.0
+    return round(min(100.0, exp + pf + stress_score + robustness + trade_sample + frequency_bonus), 2)
 
 
 def simulate(
