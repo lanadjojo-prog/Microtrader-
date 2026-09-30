@@ -24,6 +24,7 @@ class Settings:
     auto_start: bool = _bool("AUTO_START", False)
     dashboard_token: str = os.getenv("DASHBOARD_TOKEN", "")
     database_url: str = os.getenv("DATABASE_URL", "")
+    strategy_min_trades_per_day: float = _float("STRATEGY_MIN_TRADES_PER_DAY", 10.0)
 
     symbols_raw: str = os.getenv(
         "SYMBOLS",
