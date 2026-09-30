@@ -25,6 +25,8 @@ class Settings:
     dashboard_token: str = os.getenv("DASHBOARD_TOKEN", "")
     database_url: str = os.getenv("DATABASE_URL", "")
     strategy_min_trades_per_day: float = _float("STRATEGY_MIN_TRADES_PER_DAY", 10.0)
+    strategy_min_volume_ratio: float = _float("STRATEGY_MIN_VOLUME_RATIO", 0.70)
+    strategy_volume_window: int = _int("STRATEGY_VOLUME_WINDOW", 50)
 
     symbols_raw: str = os.getenv(
         "SYMBOLS",
