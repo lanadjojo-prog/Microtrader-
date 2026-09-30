@@ -83,11 +83,21 @@ class ResearchLabs:
             candidates=[]
             for row in rows:
                 try:
-                    candidates.append(Candidate(str(row["strategy"]),dict(row["params"])))
+                    params = dict(row["params"])
+                    tf = int(params.get("timeframe_min") or 0)
+                    avg_tpd = float((row.get("oos") or {}).get("avg_trades_per_day") or 0.0)
+                    if tf not in (1, 5):
+                        continue
+                    if avg_tpd < float(self.settings.strategy_min_trades_per_day):
+                        continue
+                    params["entry_sessions"] = "london_new_york"
+                    params["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
+                    params["volume_window"] = self.settings.strategy_volume_window
+                    candidates.append(Candidate(str(row["strategy"]), params))
                 except Exception:
                     continue
             if not candidates:
-                raise RuntimeError("No Strategy Lab candidates available yet")
+                raise RuntimeError("No eligible 1m/5m Strategy Lab candidates meeting the hard trades/day rule yet")
 
             # favor stronger candidates but still test multiple distinct configs
             seen=set(); uniq=[]
