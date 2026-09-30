@@ -24,6 +24,7 @@ class PaperTradingState:
     stage: str = "idle"
     message: str = "Waiting for promoted strategies"
     strategies: int = 0
+    retiring_strategies: int = 0
     expected_portfolio_trades_per_day: float = 0.0
     portfolio_target_trades_per_day: float = 10.0
     portfolio_frequency_ready: bool = False
@@ -233,15 +234,25 @@ class PaperTradingEngine:
         for row in strategies:
             paper_id = str(row.get("paper_id") or "")
             status = str(row.get("status") or "")
-            if paper_id in eligible_ids and status == "frequency_rejected":
+            open_positions = await self.store.list_positions(paper_id)
+            if paper_id in eligible_ids and status in {"frequency_rejected", "retiring"}:
                 await self.store.set_status(paper_id, "active")
                 row["status"] = "active"
-            elif paper_id not in eligible_ids and status == "active":
-                await self.store.set_status(paper_id, "frequency_rejected")
-                row["status"] = "frequency_rejected"
+            elif paper_id not in eligible_ids:
+                if open_positions and status in {"active", "frequency_rejected", "retiring"}:
+                    # Never orphan or silently delete an open forward position.
+                    # Retiring strategies manage exits but cannot open new trades.
+                    if status != "retiring":
+                        await self.store.set_status(paper_id, "retiring")
+                    row["status"] = "retiring"
+                elif status in {"active", "retiring"}:
+                    await self.store.set_status(paper_id, "frequency_rejected")
+                    row["status"] = "frequency_rejected"
 
         active = [row for row in strategies if str(row.get("status") or "") == "active"]
+        retiring = [row for row in strategies if str(row.get("status") or "") == "retiring"]
         self.state.strategies = len(active)
+        self.state.retiring_strategies = len(retiring)
         self.state.expected_portfolio_trades_per_day = round(
             expected_portfolio_trades_per_day, 3
         )
@@ -280,10 +291,14 @@ class PaperTradingEngine:
                         for row in strategies:
                             if not self.state.running:
                                 break
-                            if str(row.get("status")) != "active":
+                            status = str(row.get("status") or "")
+                            if status not in {"active", "retiring"}:
                                 continue
                             try:
-                                await self._process_strategy(row)
+                                await self._process_strategy(
+                                    row,
+                                    allow_entries=(status == "active"),
+                                )
                             except Exception as exc:
                                 await self.store.set_error(str(row["paper_id"]), str(exc))
                                 log.exception("Paper strategy failed: %s", row.get("paper_id"))
@@ -300,7 +315,7 @@ class PaperTradingEngine:
         finally:
             self.state.running = False
 
-    async def _process_strategy(self, row: dict) -> None:
+    async def _process_strategy(self, row: dict, *, allow_entries: bool = True) -> None:
         paper_id = str(row["paper_id"])
         strategy = str(row["strategy"])
         params = dict(row.get("params") or {})
@@ -351,7 +366,7 @@ class PaperTradingEngine:
                         pos["bars_held"] = int(pos.get("bars_held", 0)) + 1
                         await self.store.upsert_position(paper_id, pair, pos)
                         positions[pair] = pos
-                else:
+                elif allow_entries:
                     allowed, session_name, volume_ratio = entry_allowed(
                         closed,
                         i,
@@ -401,6 +416,8 @@ class PaperTradingEngine:
                 cursors[pair] = str(bar["t"])
 
         await self.store.touch_daily(paper_id, len(positions))
+        if not allow_entries and not positions:
+            await self.store.set_status(paper_id, "frequency_rejected")
 
     def _maybe_protect_stop(self, pos: dict, bar: dict, params: dict) -> bool:
         trigger_r, lock_r = _exit_management(params)
