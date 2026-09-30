@@ -114,6 +114,7 @@ class ResearchAgent:
             }
             self.lab.set_agent_focus([], [], decision["reason"])
             self._commit_decision(decision, [])
+            log.info("Research Agent cycle=%s waiting for discovery results", self.state.cycles)
             return
 
         family_rows = defaultdict(list)
@@ -196,6 +197,14 @@ class ResearchAgent:
 
         self.lab.set_agent_focus(focus_families, focus_timeframes, reason)
         self._commit_decision(decision, hypotheses)
+        log.info(
+            "Research Agent cycle=%s mode=%s focus_families=%s focus_timeframes=%s hypotheses=%s",
+            self.state.cycles,
+            mode,
+            ",".join(focus_families) or "-",
+            ",".join(str(x) for x in focus_timeframes) or "-",
+            len(hypotheses),
+        )
         await self._persist_decision(decision, hypotheses)
 
     def _make_hypotheses(self, focus: list[dict], tf_summary: list[dict], results: list[dict]) -> list[dict]:
