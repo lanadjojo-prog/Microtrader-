@@ -8,6 +8,7 @@ from strategy_lab import (
     choose_batch,
     discovery_candidates,
     evaluate_candidate,
+    metrics,
     simulate,
 )
 
@@ -62,6 +63,15 @@ class ResearchStabilityTests(unittest.TestCase):
         trades = simulate(candidate, "EUR/USD", bars, 0.0)
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0]["side"], "long")
+
+    def test_metrics_track_consecutive_streaks(self):
+        trades = [
+            {"exit_time": f"2026-09-30T10:{i:02d}:00+00:00", "net_return": r, "r_multiple": r}
+            for i, r in enumerate([0.01, 0.02, -0.01, -0.02, -0.03, 0.01, 0.02, 0.03, -0.01])
+        ]
+        m = metrics(trades)
+        self.assertEqual(m["max_win_streak"], 3)
+        self.assertEqual(m["max_loss_streak"], 3)
 
     def test_deep_search_freezes_incubator_parameters(self):
         seen = {candidate_signature(c) for c in discovery_candidates()}
