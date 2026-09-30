@@ -251,3 +251,28 @@ class PrecisionStrategyStore:
                 (generation, tested_total, deep_search_total),
             )
             await conn.commit()
+
+
+    async def funnel_summary(
+        self, evaluation_policy_version: str
+    ) -> List[Dict[str, Any]]:
+        """Return uncapped current-policy Precision counts."""
+        if not self.enabled:
+            return []
+        async with await psycopg.AsyncConnection.connect(
+            self.database_url, row_factory=dict_row
+        ) as conn:
+            cur = await conn.execute(
+                """
+                SELECT COALESCE(family, strategy) AS family,
+                       COALESCE(status, 'rejected') AS funnel_stage,
+                       COUNT(*)::integer AS candidates
+                FROM microtrader_precision_runs
+                WHERE COALESCE(params->>'entry_sessions', '') = 'london_new_york'
+                  AND COALESCE(execution_model->>'evaluation_policy_version', '') = %s
+                GROUP BY COALESCE(family, strategy), COALESCE(status, 'rejected')
+                ORDER BY funnel_stage, candidates DESC, family
+                """,
+                (str(evaluation_policy_version),),
+            )
+            return [dict(row) for row in await cur.fetchall()]
