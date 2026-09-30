@@ -462,6 +462,7 @@ def evaluate_candidate(
     stress_multiplier: float = 2.0,
     min_oos_trades: int = 40,
     min_profit_factor: float = 1.20,
+    min_trades_per_day: float = 10.0,
     start_capital: float = 50.0,
 ) -> dict:
     train_trades: List[dict] = []
@@ -525,6 +526,11 @@ def evaluate_candidate(
     )
 
     reasons: List[str] = []
+    frequency_ok = float(oos_metrics.get("avg_trades_per_day") or 0.0) >= float(min_trades_per_day)
+    if not frequency_ok:
+        reasons.append(
+            f"average trades/day below hard minimum {float(min_trades_per_day):g}"
+        )
     if oos_metrics["trades"] < min_oos_trades:
         reasons.append(f"fewer than {min_oos_trades} OOS trades")
     if oos_metrics["expectancy_r"] <= 0:
@@ -553,7 +559,9 @@ def evaluate_candidate(
     score += min(10.0, max(0.0, avg_fill / 10.0))
     score = round(score, 2)
 
-    if not reasons:
+    if not frequency_ok:
+        stage = "rejected"
+    elif not reasons:
         stage = "precision_deep_search"
     elif (
         oos_metrics["trades"] >= 15
@@ -605,6 +613,11 @@ def evaluate_candidate(
             "commission_pips_roundtrip": commission_pips_roundtrip,
             "stress_commission_multiplier": stress_multiplier,
             "one_position_per_pair": True,
+            "min_trades_per_day": float(min_trades_per_day),
+            "observed_oos_avg_trades_per_day": float(
+                oos_metrics.get("avg_trades_per_day") or 0.0
+            ),
+            "frequency_requirement_met": frequency_ok,
         },
         "train": train_metrics,
         "oos": oos_metrics,
