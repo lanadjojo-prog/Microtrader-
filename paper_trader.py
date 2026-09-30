@@ -72,20 +72,26 @@ def _exit_management(
 ) -> tuple[float | None, float | None]:
     """Trade-management levels expressed as NET R after modeled costs."""
     mode = str(params.get("exit_mode") or "baseline")
-    desired_net_r = None
-    if mode == "breakeven_2r":
+    trigger_r = params.get("management_trigger_r")
+    desired_net_r = params.get("management_lock_net_r")
+
+    if trigger_r is not None and desired_net_r is not None:
+        trigger_r = float(trigger_r)
+        desired_net_r = max(0.0, float(desired_net_r))
+    elif mode == "breakeven_2r":
+        trigger_r = 2.0
         desired_net_r = max(0.0, float(params.get("breakeven_buffer_r", 0.05)))
     elif mode == "protect_2r_025r":
-        desired_net_r = 0.25
+        trigger_r, desired_net_r = 2.0, 0.25
     elif mode == "lock_2r_05r":
-        desired_net_r = 0.50
+        trigger_r, desired_net_r = 2.0, 0.50
     else:
         return None, None
 
     risk_pct = risk_distance / entry if entry > 0 else 0.0
     roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
     cost_r = roundtrip_cost_pct / risk_pct if risk_pct > 0 else 0.0
-    return 2.0, cost_r + float(desired_net_r)
+    return float(trigger_r), cost_r + float(desired_net_r)
 
 
 def _rolling_vwap(bars: List[dict], a: int, b: int) -> float:
