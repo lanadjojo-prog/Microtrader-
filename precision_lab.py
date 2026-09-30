@@ -22,6 +22,9 @@ def apply_frequency_gate(results: List[dict], min_trades_per_day: float) -> List
     threshold = float(min_trades_per_day)
     for row in results:
         item = dict(row)
+        params = dict(item.get("params") or {})
+        if str(params.get("entry_sessions") or "") != "london_new_york":
+            continue
         oos = dict(item.get("oos") or {})
         observed = float(oos.get("avg_trades_per_day") or 0.0)
         status = str(item.get("status") or item.get("funnel_stage") or "")
@@ -89,6 +92,9 @@ class PrecisionStrategyLab:
             "target_pips": [4, 5, 6, 7, 8, 9, 10],
             "commission_pips_roundtrip": self.settings.precision_commission_pips,
             "min_trades_per_day": self.settings.strategy_min_trades_per_day,
+            "allowed_timeframes_min": [1],
+            "entry_sessions": ["London", "New York"],
+            "min_volume_ratio": self.settings.strategy_min_volume_ratio,
             "tick_execution": True,
             "results_loaded": len(self._results),
         })
@@ -219,6 +225,9 @@ class PrecisionStrategyLab:
                                         base.strategy,
                                         {
                                             **base.params,
+                                            "entry_sessions": "london_new_york",
+                                            "min_volume_ratio": self.settings.strategy_min_volume_ratio,
+                                            "volume_window": self.settings.strategy_volume_window,
                                             "stop_pips": stop,
                                             "target_pips": target,
                                             "risk_eur": risk,
@@ -262,6 +271,7 @@ class PrecisionStrategyLab:
                         f"Precision {idx}/{len(batch)} · {candidate.strategy} · "
                         f"{candidate.params['stop_pips']}p/{candidate.params['target_pips']}p · "
                         f"EUR {candidate.params['risk_eur']} risk · "
+                        f"London/NY · vol ≥{self.settings.strategy_min_volume_ratio:.2f}x · "
                         f"hard min {self.settings.strategy_min_trades_per_day:g} trades/day"
                     )
                     result = await asyncio.to_thread(
