@@ -480,7 +480,7 @@ class PaperTradingStore:
                     await conn.execute(
                         """
                         SELECT p.paper_id, p.pair, p.direction, p.entry_time, p.entry_price,
-                               p.stop_price, p.target_price, p.bars_held, p.risk_eur,
+                               p.risk_distance, p.stop_price, p.target_price, p.bars_held, p.risk_eur,
                                p.current_price, p.unrealized_r, p.unrealized_pnl,
                                p.last_mark_at, s.strategy, s.params
                         FROM microtrader_paper_positions p
