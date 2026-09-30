@@ -395,9 +395,11 @@ def evaluate_candidate(
     train_bars: Dict[str, List[dict]] = {}
     test_bars: Dict[str, List[dict]] = {}
     per_pair: Dict[str, dict] = {}
+    phase = str(candidate.params.get("_phase", "discovery"))
 
     for pair, bars in bars_by_pair.items():
-        split = max(2, int(len(bars) * 0.70))
+        split_fraction = 0.80 if phase == "deep_search" else 0.70
+        split = max(2, int(len(bars) * split_fraction))
         tr = bars[:split]
         te = bars[split:]
         train_bars[pair] = tr
@@ -431,6 +433,12 @@ def evaluate_candidate(
     )
 
     reasons: List[str] = []
+    if phase == "deep_search":
+        deep_days = len(_days(test_bars))
+        if deep_days < 3:
+            reasons.append("final holdout has fewer than 3 trading days")
+    else:
+        deep_days = 0
     frequency_ok = float(oos_metrics.get("avg_trades_per_day") or 0.0) >= float(min_trades_per_day)
     if not frequency_ok:
         reasons.append(
@@ -473,7 +481,6 @@ def evaluate_candidate(
     score = round(min(100.0, score), 2)
 
     raw_pass = not reasons
-    phase = str(candidate.params.get("_phase", "discovery"))
     discovery_ok = (
         frequency_ok
         and oos_metrics["trades"] >= 20
@@ -510,7 +517,11 @@ def evaluate_candidate(
         "dataset": {
             "pairs": list(bars_by_pair.keys()),
             "bars": {pair: len(bars) for pair, bars in bars_by_pair.items()},
-            "split": "70/30 chronological",
+            "split": (
+                "80/20 frozen final holdout"
+                if phase == "deep_search"
+                else "70/30 chronological inside pre-holdout data"
+            ),
         },
         "risk_model": {
             "start_capital_eur": start_capital,
@@ -540,6 +551,8 @@ def evaluate_candidate(
                 oos_metrics.get("avg_trades_per_day") or 0.0
             ),
             "frequency_requirement_met": frequency_ok,
+            "final_holdout_days": deep_days if phase == "deep_search" else None,
+            "deep_search_parameters_frozen": phase == "deep_search",
             "entry_sessions": "London 07:00-16:00 + New York 08:00-16:00 local time",
             "session_dst_aware": True,
             "min_relative_volume": float(candidate.params.get("min_volume_ratio", 0.70)),
