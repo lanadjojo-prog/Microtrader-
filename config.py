@@ -128,6 +128,11 @@ class Settings:
     precision_min_oos_trades: int = _int("PRECISION_MIN_OOS_TRADES", 40)
     precision_min_profit_factor: float = _float("PRECISION_MIN_PROFIT_FACTOR", 1.20)
 
+    # Forward paper trading for promoted Forex strategies.
+    paper_trading_auto_start: bool = _bool("PAPER_TRADING_AUTO_START", True)
+    paper_start_balance: float = _float("PAPER_START_BALANCE_EUR", 50.0)
+    paper_poll_seconds: int = _int("PAPER_POLL_SECONDS", 60)
+
     # Crypto / microstructure lab (public Bitvavo data, simulation-only)
     crypto_lab_auto_start: bool = _bool("CRYPTO_LAB_AUTO_START", False)
     crypto_lab_symbols_raw: str = os.getenv("CRYPTO_LAB_SYMBOLS", "BTC-EUR,ETH-EUR,SOL-EUR,BTC-USDC,ETH-USDC,SOL-USDC")
