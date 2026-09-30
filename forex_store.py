@@ -189,7 +189,9 @@ class ForexStrategyStore:
             return {str(row[0]) for row in rows}
 
 
-    async def load_promoted(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def load_promoted(
+        self, limit: int = 100, min_trades_per_day: float = 0.0
+    ) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
         async with await psycopg.AsyncConnection.connect(
@@ -202,10 +204,11 @@ class ForexStrategyStore:
                        train, oos, stress_oos, per_pair, robustness, funnel_score,
                        promoted, rejection_reasons, tested_at
                 FROM microtrader_forex_strategy_runs
-                WHERE promoted = TRUE OR status = 'promoted'
+                WHERE (promoted = TRUE OR status = 'promoted')
+                  AND COALESCE((oos->>'avg_trades_per_day')::double precision, 0) >= %s
                 ORDER BY tested_at ASC
                 LIMIT %s
                 """,
-                (limit,),
+                (float(min_trades_per_day), limit),
             )
             return [dict(row) for row in await cur.fetchall()]
