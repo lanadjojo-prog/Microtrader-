@@ -383,20 +383,25 @@ def evaluate_candidate(
 
     raw_pass = not reasons
     phase = str(candidate.params.get("_phase", "discovery"))
-    promoted = raw_pass and phase == "deep_search"
-
-    if promoted:
-        stage = "promoted"
-    elif raw_pass or score >= 70:
-        stage = "deep_search"
-    elif (
+    discovery_ok = (
         oos_metrics["trades"] >= 20
         and oos_metrics["expectancy_r"] > 0
         and oos_metrics["profit_factor"] >= 1.05
-    ):
-        stage = "incubator"
+    )
+    strong_ok = raw_pass or score >= 70
+
+    # Sequential funnel: Discovery -> Incubator -> Deep Search -> Promoted.
+    promoted = False
+    if phase == "deep_search":
+        if raw_pass:
+            stage = "promoted"
+            promoted = True
+        else:
+            stage = "rejected"
+    elif phase == "incubator":
+        stage = "deep_search" if strong_ok else "rejected"
     else:
-        stage = "rejected"
+        stage = "incubator" if (discovery_ok or strong_ok) else "rejected"
 
     return {
         "strategy": candidate.strategy,
