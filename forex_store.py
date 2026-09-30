@@ -205,6 +205,8 @@ class ForexStrategyStore:
                        promoted, rejection_reasons, tested_at
                 FROM microtrader_forex_strategy_runs
                 WHERE (promoted = TRUE OR status = 'promoted')
+                  AND timeframe_min IN (1, 5)
+                  AND COALESCE(params->>'entry_sessions', '') = 'london_new_york'
                   AND COALESCE((oos->>'avg_trades_per_day')::double precision, 0) >= %s
                 ORDER BY tested_at ASC
                 LIMIT %s
