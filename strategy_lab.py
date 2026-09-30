@@ -513,7 +513,10 @@ def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candi
         k for k, v in base.items()
         if isinstance(v, (int, float))
         and not isinstance(v, bool)
-        and k not in {"timeframe_min", "target_r"}
+        and k not in {
+            "timeframe_min", "target_r", "min_volume_ratio", "volume_window",
+            "risk_eur", "start_capital_eur",
+        }
     ][:4]
 
     for key in keys:
