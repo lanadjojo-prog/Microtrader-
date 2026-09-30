@@ -13,7 +13,7 @@ from ctrader_client import CTraderClient
 from config import Settings
 from research_store import ResearchStore
 from forex_research_store import ForexResearchStore
-from strategy_lab import Candidate, candidate_signature, metrics, simulate
+from strategy_lab import Candidate, aggregate_bars, candidate_signature, metrics, simulate
 from market_filters import active_session
 
 log = logging.getLogger("microtrader.research_labs")
@@ -102,10 +102,13 @@ class ResearchLabs:
                         continue
                     if str(params.get("data_source") or "") != "ctrader":
                         continue
+                    if str(params.get("direction_mode") or "") != "long_short":
+                        continue
                     if avg_tpd < float(self.settings.strategy_min_trades_per_day):
                         continue
                     params["market"] = "forex"
                     params["data_source"] = "ctrader"
+                    params["direction_mode"] = "long_short"
                     params["entry_sessions"] = "london_new_york"
                     params["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
                     params["volume_window"] = self.settings.strategy_volume_window
@@ -149,12 +152,17 @@ class ResearchLabs:
             self.state.running=False
             self.state.completed_at=datetime.now(timezone.utc).isoformat()
 
+    def _candidate_bars(self,c,bars):
+        tf=int(c.params.get("timeframe_min") or 1)
+        return aggregate_bars(bars,tf)
+
     def _candidate_trades(self,c,bars_by_symbol,cost=None):
         cost=self.settings.forex_cost_bps if cost is None else cost
         out=[]
         for symbol,bars in bars_by_symbol.items():
-            split=max(2,int(len(bars)*0.70))
-            out.extend(simulate(c,symbol,bars[split:],cost))
+            work=self._candidate_bars(c,bars)
+            split=max(2,int(len(work)*0.70))
+            out.extend(simulate(c,symbol,work[split:],cost))
         return sorted(out,key=lambda x:str(x.get("exit_time") or ""))
 
     def _score_candidates(self,candidates,bars_by_symbol):
@@ -171,8 +179,9 @@ class ResearchLabs:
         per={}
         c=Candidate(best["strategy"],best["params"])
         for s,b in bars.items():
-            split=int(len(b)*.7)
-            per[s]=metrics(simulate(c,s,b[split:],self.settings.forex_cost_bps))
+            work=self._candidate_bars(c,b)
+            split=int(len(work)*.7)
+            per[s]=metrics(simulate(c,s,work[split:],self.settings.forex_cost_bps))
         return {"candidate":best["strategy"],"params":best["params"],"per_symbol":per}
 
     def _lab_session(self,candidates,bars):
@@ -192,7 +201,8 @@ class ResearchLabs:
         c=Candidate(best["strategy"],best["params"])
         out={}
         for s,b in bars.items():
-            n=len(b); chunks=[b[:n//3],b[n//3:2*n//3],b[2*n//3:]]
+            work=self._candidate_bars(c,b)
+            n=len(work); chunks=[work[:n//3],work[n//3:2*n//3],work[2*n//3:]]
             out[s]=[metrics(simulate(c,s,x,self.settings.forex_cost_bps)) for x in chunks if len(x)>50]
         return {"candidate":best["strategy"],"chronological_regimes":out}
 
@@ -213,8 +223,9 @@ class ResearchLabs:
             for wi in range(4):
                 tr=[]
                 for s,b in bars.items():
-                    n=len(b); a=int(n*wi/8); z=int(n*(wi+4)/8)
-                    chunk=b[a:z]
+                    work=self._candidate_bars(c,b)
+                    n=len(work); a=int(n*wi/8); z=int(n*(wi+4)/8)
+                    chunk=work[a:z]
                     if len(chunk)<100: continue
                     split=int(len(chunk)*.7)
                     tr.extend(simulate(c,s,chunk[split:],self.settings.forex_cost_bps))
@@ -226,7 +237,10 @@ class ResearchLabs:
     def _neighbors(self,c):
         p=dict(c.params); out=[]
         for k,v in list(p.items()):
-            if isinstance(v,(int,float)) and k not in {"max_hold"}:
+            if isinstance(v,(int,float)) and not isinstance(v,bool) and k not in {
+                "max_hold","timeframe_min","min_volume_ratio","volume_window",
+                "risk_eur","start_capital_eur"
+            }:
                 for mult in (.9,1.1):
                     q=dict(p); nv=v*mult
                     q[k]=int(round(nv)) if isinstance(v,int) else round(nv,4)
