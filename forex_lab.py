@@ -143,6 +143,9 @@ class ForexStrategyLab:
         payload["risk_eur"] = self.settings.forex_risk_eur
         payload["cost_bps_per_side"] = self.settings.forex_cost_bps
         payload["min_trades_per_day"] = self.settings.strategy_min_trades_per_day
+        payload["preferred_trades_per_day"] = self.settings.strategy_preferred_trades_per_day
+        payload["target_trades_per_day"] = self.settings.strategy_target_trades_per_day
+        payload["portfolio_min_trades_per_day"] = self.settings.portfolio_min_trades_per_day
         payload["allowed_timeframes_min"] = [1, 5]
         payload["entry_sessions"] = ["London", "New York"]
         payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
@@ -345,7 +348,9 @@ class ForexStrategyLab:
                         f"{tf}m · target {candidate.params.get('target_r')}R · "
                         f"risk €{candidate.params.get('risk_eur')} · "
                         f"London/NY · vol ≥{self.settings.strategy_min_volume_ratio:.2f}x · "
-                        f"hard min {self.settings.strategy_min_trades_per_day:g} trades/day"
+                        f"hard min {self.settings.strategy_min_trades_per_day:g}/day · "
+                        f"frequency preference {self.settings.strategy_preferred_trades_per_day:g}-"
+                        f"{self.settings.strategy_target_trades_per_day:g}/day"
                     )
 
                     result = await asyncio.to_thread(
@@ -358,6 +363,8 @@ class ForexStrategyLab:
                         min_profit_factor=self.settings.forex_min_profit_factor,
                         min_payoff_ratio=self.settings.forex_min_payoff_ratio,
                         min_trades_per_day=self.settings.strategy_min_trades_per_day,
+                        preferred_trades_per_day=self.settings.strategy_preferred_trades_per_day,
+                        target_trades_per_day=self.settings.strategy_target_trades_per_day,
                         start_capital=self.settings.forex_start_capital,
                     )
                     signature = evaluation_signature(
