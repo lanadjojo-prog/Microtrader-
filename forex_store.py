@@ -187,3 +187,25 @@ class ForexStrategyStore:
             )
             rows = await cur.fetchall()
             return {str(row[0]) for row in rows}
+
+
+    async def load_promoted(self, limit: int = 100) -> List[Dict[str, Any]]:
+        if not self.enabled:
+            return []
+        async with await psycopg.AsyncConnection.connect(
+            self.database_url, row_factory=dict_row
+        ) as conn:
+            cur = await conn.execute(
+                """
+                SELECT run_id, signature, strategy, family, phase, status,
+                       params, pairs, timeframe_min, dataset, risk_model,
+                       train, oos, stress_oos, per_pair, robustness, funnel_score,
+                       promoted, rejection_reasons, tested_at
+                FROM microtrader_forex_strategy_runs
+                WHERE promoted = TRUE OR status = 'promoted'
+                ORDER BY tested_at ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(row) for row in await cur.fetchall()]
