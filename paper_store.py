@@ -378,11 +378,12 @@ class PaperTradingStore:
                 dict(row) for row in await (
                     await conn.execute(
                         """
-                        SELECT paper_id, trade_date, start_balance, realized_pnl,
-                               end_balance, trade_count, wins, losses, open_positions,
-                               updated_at
-                        FROM microtrader_paper_daily
-                        ORDER BY trade_date DESC, paper_id
+                        SELECT d.paper_id, d.trade_date, d.start_balance, d.realized_pnl,
+                               d.end_balance, d.trade_count, d.wins, d.losses, d.open_positions,
+                               d.updated_at, s.strategy, s.params
+                        FROM microtrader_paper_daily d
+                        JOIN microtrader_paper_strategies s ON s.paper_id=d.paper_id
+                        ORDER BY d.trade_date DESC, d.paper_id
                         LIMIT %s
                         """,
                         (daily_limit,),
@@ -393,11 +394,13 @@ class PaperTradingStore:
                 dict(row) for row in await (
                     await conn.execute(
                         """
-                        SELECT id, paper_id, pair, side, entry_time, exit_time,
-                               entry_price, exit_price, exit_reason, risk_eur,
-                               r_multiple, pnl, balance_before, balance_after
-                        FROM microtrader_paper_trades
-                        ORDER BY exit_time DESC
+                        SELECT t.id, t.paper_id, t.pair, t.side, t.entry_time, t.exit_time,
+                               t.entry_price, t.exit_price, t.exit_reason, t.risk_eur,
+                               t.r_multiple, t.pnl, t.balance_before, t.balance_after,
+                               s.strategy, s.params
+                        FROM microtrader_paper_trades t
+                        JOIN microtrader_paper_strategies s ON s.paper_id=t.paper_id
+                        ORDER BY t.exit_time DESC
                         LIMIT %s
                         """,
                         (trade_limit,),
@@ -408,10 +411,12 @@ class PaperTradingStore:
                 dict(row) for row in await (
                     await conn.execute(
                         """
-                        SELECT paper_id, pair, direction, entry_time, entry_price,
-                               stop_price, target_price, bars_held, risk_eur
-                        FROM microtrader_paper_positions
-                        ORDER BY paper_id, pair
+                        SELECT p.paper_id, p.pair, p.direction, p.entry_time, p.entry_price,
+                               p.stop_price, p.target_price, p.bars_held, p.risk_eur,
+                               s.strategy, s.params
+                        FROM microtrader_paper_positions p
+                        JOIN microtrader_paper_strategies s ON s.paper_id=p.paper_id
+                        ORDER BY p.paper_id, p.pair
                         """
                     )
                 ).fetchall()
