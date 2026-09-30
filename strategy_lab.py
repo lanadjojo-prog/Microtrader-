@@ -474,7 +474,7 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
-RESEARCH_POLICY_VERSION = "forex-ctrader-v3-frozen-deep-holdout20-aligned-bars"
+RESEARCH_POLICY_VERSION = "forex-ctrader-v4-holdout20-oos20-aligned-bars"
 FINAL_HOLDOUT_FRACTION = 0.20
 DISCOVERY_SOURCE_BARS = 10000
 INCUBATOR_SOURCE_BARS = 20000
