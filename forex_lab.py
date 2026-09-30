@@ -50,6 +50,30 @@ def _clean_params(params: dict, phase: str) -> dict:
     return out
 
 
+def apply_frequency_gate(results: List[dict], min_trades_per_day: float) -> List[dict]:
+    """Reclassify legacy saved rows against the current hard frequency rule."""
+    out: List[dict] = []
+    threshold = float(min_trades_per_day)
+    for row in results:
+        item = dict(row)
+        oos = dict(item.get("oos") or {})
+        observed = float(oos.get("avg_trades_per_day") or 0.0)
+        if observed < threshold:
+            status = str(item.get("status") or item.get("funnel_stage") or "")
+            if status in {"incubator", "deep_search", "promoted"}:
+                item["status"] = "rejected"
+                item["funnel_stage"] = "rejected"
+                item["promoted"] = False
+                reasons = list(item.get("rejection_reasons") or [])
+                reason = f"average trades/day below hard minimum {threshold:g}"
+                if reason not in reasons:
+                    reasons.append(reason)
+                item["rejection_reasons"] = reasons
+                item["legacy_frequency_reclassified"] = True
+        out.append(item)
+    return out
+
+
 def phase_candidates_from_results(results: List[dict]) -> List[ForexCandidate]:
     """Rebuild next-stage work from append-only stored runs."""
     queued: List[ForexCandidate] = []
@@ -110,6 +134,7 @@ class ForexStrategyLab:
         payload["start_capital_eur"] = self.settings.forex_start_capital
         payload["risk_eur"] = self.settings.forex_risk_eur
         payload["cost_bps_per_side"] = self.settings.forex_cost_bps
+        payload["min_trades_per_day"] = self.settings.strategy_min_trades_per_day
         payload["results_loaded"] = len(self._results)
         return payload
 
@@ -193,7 +218,13 @@ class ForexStrategyLab:
             self.state.generation = int(saved.get("generation", 0))
             self.state.tested_total = int(saved.get("tested_total", 0))
             self.state.promoted_total = int(saved.get("promoted_total", 0))
-            self._results = await self.store.load_results(limit=1000)
+            self._results = apply_frequency_gate(
+                await self.store.load_results(limit=1000),
+                self.settings.strategy_min_trades_per_day,
+            )
+            self.state.promoted_total = sum(
+                1 for row in self._results if bool(row.get("promoted"))
+            )
             for row in [x for x in self._results if str(x.get("status") or x.get("funnel_stage") or "") == "promoted"][:5]:
                 oos = row.get("oos") or {}
                 stress = row.get("stress_oos") or {}
@@ -231,7 +262,10 @@ class ForexStrategyLab:
                         continue
 
                 seen = await self.store.load_signatures()
-                self._results = await self.store.load_results(limit=1000)
+                self._results = apply_frequency_gate(
+                    await self.store.load_results(limit=1000),
+                    self.settings.strategy_min_trades_per_day,
+                )
 
                 advanced = phase_candidates_from_results(self._results)
                 discovery: List[ForexCandidate] = []
@@ -250,7 +284,9 @@ class ForexStrategyLab:
                 remaining = []
                 candidate_seen: set[str] = set()
                 for candidate in ordered:
-                    sig = evaluation_signature(candidate, source)
+                    sig = evaluation_signature(
+                        candidate, source, self.settings.strategy_min_trades_per_day
+                    )
                     local_key = candidate_signature(candidate)
                     if sig in seen or local_key in candidate_seen:
                         continue
@@ -291,7 +327,8 @@ class ForexStrategyLab:
                         f"{str(candidate.params.get('_phase', 'discovery')).replace('_', ' ').title()} "
                         f"{idx}/{len(batch)} · {candidate.strategy} · "
                         f"{tf}m · target {candidate.params.get('target_r')}R · "
-                        f"risk €{candidate.params.get('risk_eur')}"
+                        f"risk €{candidate.params.get('risk_eur')} · "
+                        f"hard min {self.settings.strategy_min_trades_per_day:g} trades/day"
                     )
 
                     result = await asyncio.to_thread(
@@ -303,9 +340,12 @@ class ForexStrategyLab:
                         min_oos_trades=self.settings.forex_min_oos_trades,
                         min_profit_factor=self.settings.forex_min_profit_factor,
                         min_payoff_ratio=self.settings.forex_min_payoff_ratio,
+                        min_trades_per_day=self.settings.strategy_min_trades_per_day,
                         start_capital=self.settings.forex_start_capital,
                     )
-                    signature = evaluation_signature(candidate, source)
+                    signature = evaluation_signature(
+                        candidate, source, self.settings.strategy_min_trades_per_day
+                    )
                     result["dataset"]["version"] = dataset_version(source)
                     result["dataset"]["source"] = self.settings.forex_data_provider
                     run_id = await self.store.save_run(signature, result)
@@ -373,8 +413,14 @@ def dataset_version(bars_by_pair: Dict[str, List[dict]]) -> str:
 def evaluation_signature(
     candidate: ForexCandidate,
     bars_by_pair: Dict[str, List[dict]],
+    min_trades_per_day: float = 10.0,
 ) -> str:
-    raw = candidate_signature(candidate) + ":" + dataset_version(bars_by_pair)
+    raw = (
+        candidate_signature(candidate)
+        + ":"
+        + dataset_version(bars_by_pair)
+        + f":hard-min-trades-day={float(min_trades_per_day):g}:v1"
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
