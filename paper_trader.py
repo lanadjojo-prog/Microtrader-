@@ -546,6 +546,16 @@ class PaperTradingEngine:
             expected_portfolio_trades_per_day
             >= float(self.settings.portfolio_min_trades_per_day)
         )
+        log.info(
+            "Paper discovery: forex_promoted=%s research_validated=%s active=%s "
+            "combined_expected_tpd=%.2f hard_per_strategy=%.1f portfolio_target=%.1f",
+            len(forex_promoted),
+            len(research_validated),
+            len(active),
+            expected_portfolio_trades_per_day,
+            float(self.settings.strategy_min_trades_per_day),
+            float(self.settings.portfolio_min_trades_per_day),
+        )
         return strategies
 
     async def _run(self) -> None:
