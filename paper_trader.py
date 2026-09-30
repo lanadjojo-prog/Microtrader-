@@ -24,6 +24,9 @@ class PaperTradingState:
     stage: str = "idle"
     message: str = "Waiting for promoted strategies"
     strategies: int = 0
+    expected_portfolio_trades_per_day: float = 0.0
+    portfolio_target_trades_per_day: float = 10.0
+    portfolio_frequency_ready: bool = False
     last_cycle_at: Optional[str] = None
     last_error: Optional[str] = None
 
@@ -136,6 +139,10 @@ class PaperTradingEngine:
         payload["allowed_timeframes_min"] = [1, 5]
         payload["entry_sessions"] = ["London", "New York"]
         payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
+        payload["strategy_min_trades_per_day"] = self.settings.strategy_min_trades_per_day
+        payload["strategy_preferred_trades_per_day"] = self.settings.strategy_preferred_trades_per_day
+        payload["strategy_target_trades_per_day"] = self.settings.strategy_target_trades_per_day
+        payload["portfolio_min_trades_per_day"] = self.settings.portfolio_min_trades_per_day
         return payload
 
     async def start(self) -> None:
@@ -174,6 +181,8 @@ class PaperTradingEngine:
             min_trades_per_day=self.settings.strategy_min_trades_per_day,
         )
         eligible_ids: set[str] = set()
+        portfolio_sources: set[str] = set()
+        expected_portfolio_trades_per_day = 0.0
         for row in promoted:
             strategy = str(row.get("strategy") or "")
             if strategy not in self.SUPPORTED:
@@ -185,6 +194,12 @@ class PaperTradingEngine:
                 k: v for k, v in dict(row.get("params") or {}).items()
                 if k != "_phase"
             }
+            source_key = _paper_id({**row, "params": base_params})
+            if source_key not in portfolio_sources:
+                portfolio_sources.add(source_key)
+                expected_portfolio_trades_per_day += float(
+                    (row.get("oos") or {}).get("avg_trades_per_day") or 0.0
+                )
             # Older promoted runs predate exit-management testing. Keep their
             # frozen baseline untouched and add a simultaneous +2R -> +0.25R
             # protection variant for clean forward comparison.
@@ -227,6 +242,16 @@ class PaperTradingEngine:
 
         active = [row for row in strategies if str(row.get("status") or "") == "active"]
         self.state.strategies = len(active)
+        self.state.expected_portfolio_trades_per_day = round(
+            expected_portfolio_trades_per_day, 3
+        )
+        self.state.portfolio_target_trades_per_day = float(
+            self.settings.portfolio_min_trades_per_day
+        )
+        self.state.portfolio_frequency_ready = (
+            expected_portfolio_trades_per_day
+            >= float(self.settings.portfolio_min_trades_per_day)
+        )
         return strategies
 
     async def _run(self) -> None:
@@ -240,11 +265,17 @@ class PaperTradingEngine:
                         self.state.stage = "waiting_promoted"
                         self.state.message = "No promoted strategies yet."
                     else:
-                        self.state.stage = "paper_trading"
+                        self.state.stage = (
+                            "paper_trading"
+                            if self.state.portfolio_frequency_ready
+                            else "building_portfolio"
+                        )
                         self.state.message = (
                             f"Paper trading {self.state.strategies} eligible promoted "
                             f"strateg{'y' if self.state.strategies==1 else 'ies'} from €{self.settings.paper_start_balance:.0f}; "
-                            f"hard minimum {self.settings.strategy_min_trades_per_day:g} trades/day."
+                            f"strategy hard minimum {self.settings.strategy_min_trades_per_day:g}/day; "
+                            f"portfolio frequency {self.state.expected_portfolio_trades_per_day:.1f}/"
+                            f"{self.settings.portfolio_min_trades_per_day:g} trades/day."
                         )
                         for row in strategies:
                             if not self.state.running:
