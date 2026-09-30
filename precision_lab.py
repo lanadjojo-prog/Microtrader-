@@ -17,6 +17,27 @@ from precision_store import PrecisionStrategyStore
 log = logging.getLogger("microtrader.precision_lab")
 
 
+def apply_frequency_gate(results: List[dict], min_trades_per_day: float) -> List[dict]:
+    out: List[dict] = []
+    threshold = float(min_trades_per_day)
+    for row in results:
+        item = dict(row)
+        oos = dict(item.get("oos") or {})
+        observed = float(oos.get("avg_trades_per_day") or 0.0)
+        status = str(item.get("status") or item.get("funnel_stage") or "")
+        if observed < threshold and status in {"precision_incubator", "precision_deep_search"}:
+            item["status"] = "rejected"
+            item["funnel_stage"] = "rejected"
+            reasons = list(item.get("rejection_reasons") or [])
+            reason = f"average trades/day below hard minimum {threshold:g}"
+            if reason not in reasons:
+                reasons.append(reason)
+            item["rejection_reasons"] = reasons
+            item["legacy_frequency_reclassified"] = True
+        out.append(item)
+    return out
+
+
 @dataclass
 class PrecisionLabState:
     running: bool = False
@@ -67,6 +88,7 @@ class PrecisionStrategyLab:
             "stop_pips": [2, 3, 4, 5],
             "target_pips": [4, 5, 6, 7, 8, 9, 10],
             "commission_pips_roundtrip": self.settings.precision_commission_pips,
+            "min_trades_per_day": self.settings.strategy_min_trades_per_day,
             "tick_execution": True,
             "results_loaded": len(self._results),
         })
@@ -150,7 +172,14 @@ class PrecisionStrategyLab:
             self.state.generation = int(saved.get("generation", 0))
             self.state.tested_total = int(saved.get("tested_total", 0))
             self.state.deep_search_total = int(saved.get("deep_search_total", 0))
-            self._results = await self.store.load_results(limit=250)
+            self._results = apply_frequency_gate(
+                await self.store.load_results(limit=250),
+                self.settings.strategy_min_trades_per_day,
+            )
+            self.state.deep_search_total = sum(
+                1 for row in self._results
+                if str(row.get("status") or row.get("funnel_stage") or "") == "precision_deep_search"
+            )
 
             bars: Dict[str, List[dict]] = {}
             ticks: Dict[str, List[QuoteTick]] = {}
@@ -174,8 +203,13 @@ class PrecisionStrategyLab:
                 configured: List[PrecisionCandidate] = []
                 templates = candidate_grid()
                 by_strategy = {}
+                high_frequency_families = {
+                    "liquidity_sweep_fvg",
+                    "displacement_fvg_retrace",
+                }
                 for c in templates:
-                    by_strategy.setdefault(c.strategy, c)
+                    if c.strategy in high_frequency_families:
+                        by_strategy.setdefault(c.strategy, c)
                 for base in by_strategy.values():
                     for stop in (2.0, 3.0, 4.0, 5.0):
                         for target in (4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0):
@@ -195,7 +229,9 @@ class PrecisionStrategyLab:
 
                 remaining = [
                     c for c in configured
-                    if evaluation_signature(c, version) not in seen
+                    if evaluation_signature(
+                        c, version, self.settings.strategy_min_trades_per_day
+                    ) not in seen
                 ]
                 if not remaining:
                     self.state.stage = "waiting_new_data"
@@ -225,7 +261,8 @@ class PrecisionStrategyLab:
                     self.state.message = (
                         f"Precision {idx}/{len(batch)} · {candidate.strategy} · "
                         f"{candidate.params['stop_pips']}p/{candidate.params['target_pips']}p · "
-                        f"EUR {candidate.params['risk_eur']} risk"
+                        f"EUR {candidate.params['risk_eur']} risk · "
+                        f"hard min {self.settings.strategy_min_trades_per_day:g} trades/day"
                     )
                     result = await asyncio.to_thread(
                         evaluate_candidate,
@@ -236,11 +273,14 @@ class PrecisionStrategyLab:
                         stress_multiplier=self.settings.precision_stress_multiplier,
                         min_oos_trades=self.settings.precision_min_oos_trades,
                         min_profit_factor=self.settings.precision_min_profit_factor,
+                        min_trades_per_day=self.settings.strategy_min_trades_per_day,
                         start_capital=self.settings.precision_start_capital,
                     )
                     result["dataset"]["version"] = version
                     result["dataset"]["source"] = self.settings.precision_data_provider
-                    signature = evaluation_signature(candidate, version)
+                    signature = evaluation_signature(
+                        candidate, version, self.settings.strategy_min_trades_per_day
+                    )
                     run_id = await self.store.save_run(signature, result)
                     clean = {k: v for k, v in result.items() if not k.startswith("_")}
                     if run_id:
@@ -296,5 +336,15 @@ def dataset_version(bars: Dict[str, List[dict]], ticks: Dict[str, List[QuoteTick
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
 
 
-def evaluation_signature(candidate: PrecisionCandidate, data_version: str) -> str:
-    return hashlib.sha256((candidate_signature(candidate) + ":" + data_version).encode()).hexdigest()
+def evaluation_signature(
+    candidate: PrecisionCandidate,
+    data_version: str,
+    min_trades_per_day: float = 10.0,
+) -> str:
+    raw = (
+        candidate_signature(candidate)
+        + ":"
+        + data_version
+        + f":hard-min-trades-day={float(min_trades_per_day):g}:v1"
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()
