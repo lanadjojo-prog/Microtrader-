@@ -163,6 +163,20 @@ class PaperTradingStore:
             )
             await conn.commit()
 
+    async def set_status(self, paper_id: str, status: str) -> None:
+        if not self.enabled:
+            return
+        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+            await conn.execute(
+                """
+                UPDATE microtrader_paper_strategies
+                SET status=%s, last_cycle_at=NOW()
+                WHERE paper_id=%s
+                """,
+                (str(status), paper_id),
+            )
+            await conn.commit()
+
     async def set_error(self, paper_id: str, error: str) -> None:
         if not self.enabled:
             return
