@@ -353,7 +353,12 @@ class ForexResearchStore:
             return [dict(r) for r in await cur.fetchall()]
 
     async def funnel_summary(self, policy_version: str) -> List[Dict[str, Any]]:
-        """Return uncapped counts for the active research policy."""
+        """Return active candidate counts, not cumulative phase history.
+
+        A configuration can move through several phases. Counting every stored
+        evaluation makes one configuration appear multiple times. Keep only the
+        most recent row for each strategy + phase-independent parameter set.
+        """
         if not self.enabled:
             return []
         async with await psycopg.AsyncConnection.connect(
@@ -361,11 +366,21 @@ class ForexResearchStore:
         ) as conn:
             cur = await conn.execute(
                 """
+                WITH active AS (
+                    SELECT strategy, family, funnel_stage, tested_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY strategy,
+                                            (params - '_phase' - '_policy_version')
+                               ORDER BY tested_at DESC
+                           ) AS rn
+                    FROM microtrader_forex_research_strategy_results
+                    WHERE COALESCE(params->>'_policy_version', '') = %s
+                )
                 SELECT COALESCE(family, strategy) AS family,
                        COALESCE(funnel_stage, 'rejected') AS funnel_stage,
                        COUNT(*)::integer AS candidates
-                FROM microtrader_forex_research_strategy_results
-                WHERE COALESCE(params->>'_policy_version', '') = %s
+                FROM active
+                WHERE rn = 1
                 GROUP BY COALESCE(family, strategy),
                          COALESCE(funnel_stage, 'rejected')
                 ORDER BY funnel_stage, candidates DESC, family
