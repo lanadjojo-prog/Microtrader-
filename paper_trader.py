@@ -36,7 +36,11 @@ class PaperTradingState:
 
 
 def _paper_id(row: dict) -> str:
-    params = {k: v for k, v in dict(row.get("params") or {}).items() if k != "_phase"}
+    params = {
+        k: v for k, v in dict(row.get("params") or {}).items()
+        if k not in {"_phase", "risk_eur"}
+        and not k.startswith("_research_")
+    }
     raw = json.dumps(
         {
             "strategy": row.get("strategy"),
@@ -409,6 +413,7 @@ class PaperTradingEngine:
         payload = asdict(self.state)
         payload["start_balance_eur"] = self.settings.paper_start_balance
         payload["poll_seconds"] = self.settings.paper_poll_seconds
+        payload["paper_risk_eur"] = self.settings.paper_risk_eur
         payload["execution"] = (
             "simulated-only; causal close execution; signals use only completed bars; "
             "no broker orders"
@@ -491,6 +496,7 @@ class PaperTradingEngine:
                 if k != "_phase"
             }
             base_params["_paper_source"] = "forex"
+            base_params["risk_eur"] = float(self.settings.paper_risk_eur)
             source_key = _paper_id({**row, "params": base_params})
             if source_key not in portfolio_sources:
                 portfolio_sources.add(source_key)
@@ -528,8 +534,14 @@ class PaperTradingEngine:
                 continue
             params["_paper_source"] = "research"
             params["_paper_exit_model"] = "research_native"
-            params.setdefault("risk_eur", 0.75)
+            params["risk_eur"] = float(self.settings.paper_risk_eur)
             params.setdefault("stop_atr", 1.0)
+            params["_research_max_loss_streak"] = int(
+                (row.get("oos") or {}).get("max_loss_streak") or 0
+            )
+            params["_research_max_win_streak"] = int(
+                (row.get("oos") or {}).get("max_win_streak") or 0
+            )
 
             source_row = {
                 "strategy": strategy,
@@ -715,7 +727,7 @@ class PaperTradingEngine:
                         entry = float(decision["entry_price"])
                         risk_distance = float(decision["risk_distance"])
                         target_r = float(params.get("target_r", 2.0))
-                        risk_eur = float(params.get("risk_eur", 2.0))
+                        risk_eur = float(self.settings.paper_risk_eur)
                         stop = _max_loss_stop_price(
                             entry=entry,
                             risk_distance=risk_distance,
