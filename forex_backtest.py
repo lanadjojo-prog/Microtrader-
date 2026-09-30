@@ -7,6 +7,7 @@ from statistics import mean, pstdev
 from typing import Dict, List, Optional
 
 from forex_metrics import strategy_metrics
+from market_filters import entry_allowed
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,7 @@ def candidate_signature(candidate: ForexCandidate) -> str:
 def candidate_grid() -> List[ForexCandidate]:
     """Deliberately small forex-first search space for CPU-constrained Render."""
     out: List[ForexCandidate] = []
-    for tf in (1, 5, 15):
+    for tf in (1, 5):
         for target_r in (2.0, 3.0, 4.0, 5.0, 8.0):
             exit_modes = ("baseline",) if target_r <= 2.0 else (
                 "baseline",
@@ -43,6 +44,9 @@ def candidate_grid() -> List[ForexCandidate]:
                         "stop_atr": stop_atr,
                         "risk_eur": 0.75,
                         "exit_mode": exit_mode,
+                        "entry_sessions": "london_new_york",
+                        "min_volume_ratio": 0.70,
+                        "volume_window": 50,
                         "_phase": "discovery",
                     }
                     out.append(ForexCandidate(
@@ -191,6 +195,15 @@ def _simulate_asymmetric_breakout(
     i = max(window + 2, 16)
 
     while i < len(bars) - 2:
+        allowed, _, _ = entry_allowed(
+            bars,
+            i,
+            min_volume_ratio=float(p.get("min_volume_ratio", 0.70)),
+            volume_window=int(p.get("volume_window", 50)),
+        )
+        if not allowed:
+            i += 1
+            continue
         prior = bars[i - window - 1:i - 1]
         prev_close = float(bars[i - 1]["c"])
         high_break = max(float(x["h"]) for x in prior)
@@ -237,6 +250,15 @@ def _simulate_trend_pullback(
     i = max(slow + 1, 16)
 
     while i < len(bars) - 2:
+        allowed, _, _ = entry_allowed(
+            bars,
+            i,
+            min_volume_ratio=float(p.get("min_volume_ratio", 0.70)),
+            volume_window=int(p.get("volume_window", 50)),
+        )
+        if not allowed:
+            i += 1
+            continue
         closes = [float(x["c"]) for x in bars[i - slow:i]]
         fast_ma = mean(closes[-fast:])
         slow_ma = mean(closes)
@@ -288,6 +310,15 @@ def _simulate_range_reversal(
     i = max(window + 1, 16)
 
     while i < len(bars) - 2:
+        allowed, _, _ = entry_allowed(
+            bars,
+            i,
+            min_volume_ratio=float(p.get("min_volume_ratio", 0.70)),
+            volume_window=int(p.get("volume_window", 50)),
+        )
+        if not allowed:
+            i += 1
+            continue
         closes = [float(x["c"]) for x in bars[i - window:i]]
         mu = mean(closes)
         sigma = pstdev(closes)
@@ -495,6 +526,11 @@ def evaluate_candidate(
                 oos_metrics.get("avg_trades_per_day") or 0.0
             ),
             "frequency_requirement_met": frequency_ok,
+            "entry_sessions": "London 07:00-16:00 + New York 08:00-16:00 local time",
+            "session_dst_aware": True,
+            "min_relative_volume": float(candidate.params.get("min_volume_ratio", 0.70)),
+            "volume_window_bars": int(candidate.params.get("volume_window", 50)),
+            "entry_filter_uses_completed_volume_only": True,
         },
         "promoted": promoted,
         "rejection_reasons": reasons,
