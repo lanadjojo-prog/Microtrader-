@@ -77,15 +77,15 @@ class Settings:
     research_agent_focus_families: int = _int("RESEARCH_AGENT_FOCUS_FAMILIES", 4)
 
     # Forex-first research. External data is deliberately separate from broker execution.
-    forex_first: bool = _bool("FOREX_FIRST", False)
-    forex_lab_auto_start: bool = _bool("FOREX_LAB_AUTO_START", False)
+    forex_first: bool = _bool("FOREX_FIRST", True)
+    forex_lab_auto_start: bool = _bool("FOREX_LAB_AUTO_START", True)
     forex_pairs_raw: str = os.getenv("FOREX_PAIRS", "EUR/USD,GBP/USD,USD/JPY")
     forex_start_capital: float = _float("FOREX_START_CAPITAL_EUR", 50.0)
     forex_risk_eur: float = _float("FOREX_RISK_EUR", 0.75)
     forex_cost_bps: float = _float("FOREX_COST_BPS", 0.50)
     forex_stress_cost_multiplier: float = _float("FOREX_STRESS_COST_MULTIPLIER", 2.0)
     forex_lookback_days: int = _int("FOREX_LOOKBACK_DAYS", 120)
-    forex_max_bars_per_pair: int = _int("FOREX_MAX_BARS_PER_PAIR", 12000)
+    forex_max_bars_per_pair: int = _int("FOREX_MAX_BARS_PER_PAIR", 30000)
     forex_lab_batch_size: int = _int("FOREX_LAB_BATCH_SIZE", 12)
     forex_min_oos_trades: int = _int("FOREX_MIN_OOS_TRADES", 60)
     forex_min_profit_factor: float = _float("FOREX_MIN_PROFIT_FACTOR", 1.25)
@@ -95,7 +95,7 @@ class Settings:
 
     # Read-only market-data layer for testing. external/auto uses Dukascopy and
     # optionally overlays recent Twelve Data bars when a key is configured.
-    forex_data_provider: str = os.getenv("FOREX_DATA_PROVIDER", "external").strip().lower()
+    forex_data_provider: str = os.getenv("FOREX_DATA_PROVIDER", "ctrader").strip().lower()
     twelve_data_api_key: str = os.getenv("TWELVE_DATA_API_KEY", "").strip()
     twelve_data_base_url: str = os.getenv(
         "TWELVE_DATA_BASE_URL", "https://api.twelvedata.com"
@@ -120,12 +120,12 @@ class Settings:
     ctrader_account_id: str = os.getenv("CTRADER_ACCOUNT_ID", "")
 
     # Precision Lab: separate tight-stop tester using bid/ask tick execution.
-    precision_lab_auto_start: bool = _bool("PRECISION_LAB_AUTO_START", False)
-    precision_data_provider: str = os.getenv("PRECISION_DATA_PROVIDER", "external").strip().lower()
+    precision_lab_auto_start: bool = _bool("PRECISION_LAB_AUTO_START", True)
+    precision_data_provider: str = os.getenv("PRECISION_DATA_PROVIDER", "ctrader").strip().lower()
     precision_pairs_raw: str = os.getenv("PRECISION_PAIRS", "EUR/USD")
-    precision_lookback_days: int = _int("PRECISION_LOOKBACK_DAYS", 7)
+    precision_lookback_days: int = _int("PRECISION_LOOKBACK_DAYS", 3)
     precision_max_bars_per_pair: int = _int("PRECISION_MAX_BARS_PER_PAIR", 12000)
-    precision_max_ticks_per_side: int = _int("PRECISION_MAX_TICKS_PER_SIDE", 250000)
+    precision_max_ticks_per_side: int = _int("PRECISION_MAX_TICKS_PER_SIDE", 100000)
     precision_batch_size: int = _int("PRECISION_BATCH_SIZE", 12)
     precision_start_capital: float = _float("PRECISION_START_CAPITAL_EUR", 50.0)
     precision_risk_eur: float = _float("PRECISION_RISK_EUR", 0.75)
