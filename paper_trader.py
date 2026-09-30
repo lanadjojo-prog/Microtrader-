@@ -63,15 +63,29 @@ def _atr(bars: List[dict], i: int, window: int = 14) -> float:
     return mean(vals) if vals else 0.0
 
 
-def _exit_management(params: dict) -> tuple[float | None, float | None]:
+def _exit_management(
+    params: dict,
+    *,
+    entry: float,
+    risk_distance: float,
+    cost_bps: float,
+) -> tuple[float | None, float | None]:
+    """Trade-management levels expressed as NET R after modeled costs."""
     mode = str(params.get("exit_mode") or "baseline")
+    desired_net_r = None
     if mode == "breakeven_2r":
-        return 2.0, 0.0
-    if mode == "protect_2r_025r":
-        return 2.0, 0.25
-    if mode == "lock_2r_05r":
-        return 2.0, 0.50
-    return None, None
+        desired_net_r = max(0.0, float(params.get("breakeven_buffer_r", 0.05)))
+    elif mode == "protect_2r_025r":
+        desired_net_r = 0.25
+    elif mode == "lock_2r_05r":
+        desired_net_r = 0.50
+    else:
+        return None, None
+
+    risk_pct = risk_distance / entry if entry > 0 else 0.0
+    roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
+    cost_r = roundtrip_cost_pct / risk_pct if risk_pct > 0 else 0.0
+    return 2.0, cost_r + float(desired_net_r)
 
 
 def _rolling_vwap(bars: List[dict], a: int, b: int) -> float:
@@ -705,7 +719,12 @@ class PaperTradingEngine:
             await self.store.set_status(paper_id, "frequency_rejected")
 
     def _maybe_protect_stop(self, pos: dict, bar: dict, params: dict) -> bool:
-        trigger_r, lock_r = _exit_management(params)
+        trigger_r, lock_r = _exit_management(
+            params,
+            entry=float(pos["entry_price"]),
+            risk_distance=float(pos["risk_distance"]),
+            cost_bps=float(self.settings.forex_cost_bps),
+        )
         if trigger_r is None or lock_r is None:
             return False
         direction = int(pos["direction"])
