@@ -92,6 +92,9 @@ class PrecisionStrategyLab:
             "target_pips": [4, 5, 6, 7, 8, 9, 10],
             "commission_pips_roundtrip": self.settings.precision_commission_pips,
             "min_trades_per_day": self.settings.strategy_min_trades_per_day,
+            "preferred_trades_per_day": self.settings.strategy_preferred_trades_per_day,
+            "target_trades_per_day": self.settings.strategy_target_trades_per_day,
+            "portfolio_min_trades_per_day": self.settings.portfolio_min_trades_per_day,
             "allowed_timeframes_min": [1],
             "entry_sessions": ["London", "New York"],
             "min_volume_ratio": self.settings.strategy_min_volume_ratio,
@@ -272,7 +275,9 @@ class PrecisionStrategyLab:
                         f"{candidate.params['stop_pips']}p/{candidate.params['target_pips']}p · "
                         f"EUR {candidate.params['risk_eur']} risk · "
                         f"London/NY · vol ≥{self.settings.strategy_min_volume_ratio:.2f}x · "
-                        f"hard min {self.settings.strategy_min_trades_per_day:g} trades/day"
+                        f"hard min {self.settings.strategy_min_trades_per_day:g}/day · "
+                        f"frequency preference {self.settings.strategy_preferred_trades_per_day:g}-"
+                        f"{self.settings.strategy_target_trades_per_day:g}/day"
                     )
                     result = await asyncio.to_thread(
                         evaluate_candidate,
@@ -284,6 +289,8 @@ class PrecisionStrategyLab:
                         min_oos_trades=self.settings.precision_min_oos_trades,
                         min_profit_factor=self.settings.precision_min_profit_factor,
                         min_trades_per_day=self.settings.strategy_min_trades_per_day,
+                        preferred_trades_per_day=self.settings.strategy_preferred_trades_per_day,
+                        target_trades_per_day=self.settings.strategy_target_trades_per_day,
                         start_capital=self.settings.precision_start_capital,
                     )
                     result["dataset"]["version"] = version
