@@ -220,7 +220,13 @@ class ResearchAgent:
             winrate = float(oos.get("win_rate_pct") or 0)
             exp = float(oos.get("expectancy_bps") or 0)
 
-            if payoff >= 2.0 and winrate < 50 and exp > 0:
+            if fam == "regime_ensemble":
+                thesis = (
+                    "regime_ensemble tests whether trend-pullback, breakout and "
+                    "VWAP-reversion entries contribute independently across regimes; "
+                    "prioritize only if multiple entry models remain positive OOS."
+                )
+            elif payoff >= 2.0 and winrate < 50 and exp > 0:
                 thesis = f"{fam} may have a positively skewed payoff profile worth deeper R-multiple testing."
             elif exp > 0:
                 thesis = f"{fam} shows positive out-of-sample expectancy and should receive local parameter refinement."
