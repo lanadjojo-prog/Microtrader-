@@ -28,11 +28,16 @@ class PaperTradingState:
     message: str = "Waiting for promoted strategies"
     strategies: int = 0
     retiring_strategies: int = 0
+    paused_strategies: int = 0
     expected_portfolio_trades_per_day: float = 0.0
     portfolio_target_trades_per_day: float = 10.0
     portfolio_frequency_ready: bool = False
     last_cycle_at: Optional[str] = None
     last_error: Optional[str] = None
+
+
+def _loss_streak_limit(strategy: str, normal_limit: int, asymmetric_limit: int) -> int:
+    return int(asymmetric_limit) if str(strategy) == "asymmetric_breakout" else int(normal_limit)
 
 
 def _paper_id(row: dict) -> str:
@@ -414,6 +419,8 @@ class PaperTradingEngine:
         payload["start_balance_eur"] = self.settings.paper_start_balance
         payload["poll_seconds"] = self.settings.paper_poll_seconds
         payload["paper_risk_eur"] = self.settings.paper_risk_eur
+        payload["max_loss_streak"] = self.settings.strategy_max_loss_streak
+        payload["max_loss_streak_asymmetric"] = self.settings.strategy_max_loss_streak_asymmetric
         payload["execution"] = (
             "simulated-only; causal close execution; signals use only completed bars; "
             "no broker orders"
@@ -569,12 +576,34 @@ class PaperTradingEngine:
         for row in strategies:
             paper_id = str(row.get("paper_id") or "")
             status = str(row.get("status") or "")
+            strategy = str(row.get("strategy") or "")
             open_positions = await self.store.list_positions(paper_id)
+            loss_streak = await self.store.current_loss_streak(paper_id)
+            loss_streak_limit = _loss_streak_limit(
+                strategy,
+                self.settings.strategy_max_loss_streak,
+                self.settings.strategy_max_loss_streak_asymmetric,
+            )
+            row["paper_current_loss_streak"] = loss_streak
+            row["paper_loss_streak_limit"] = loss_streak_limit
+
+            # A breached forward-loss streak is a sticky review state. Existing
+            # positions keep being managed, but no new entries are allowed.
+            if (
+                paper_id in eligible_ids
+                and status in {"active", "frequency_rejected", "retiring"}
+                and loss_streak > loss_streak_limit
+            ):
+                if status != "review_pause":
+                    await self.store.set_status(paper_id, "review_pause")
+                row["status"] = "review_pause"
+                status = "review_pause"
+
             if paper_id in eligible_ids and status in {"frequency_rejected", "retiring"}:
                 await self.store.set_status(paper_id, "active")
                 row["status"] = "active"
             elif paper_id not in eligible_ids:
-                if open_positions and status in {"active", "frequency_rejected", "retiring"}:
+                if open_positions and status in {"active", "frequency_rejected", "retiring", "review_pause"}:
                     if status != "retiring":
                         await self.store.set_status(paper_id, "retiring")
                     row["status"] = "retiring"
@@ -584,8 +613,10 @@ class PaperTradingEngine:
 
         active = [row for row in strategies if str(row.get("status") or "") == "active"]
         retiring = [row for row in strategies if str(row.get("status") or "") == "retiring"]
+        paused = [row for row in strategies if str(row.get("status") or "") == "review_pause"]
         self.state.strategies = len(active)
         self.state.retiring_strategies = len(retiring)
+        self.state.paused_strategies = len(paused)
         self.state.expected_portfolio_trades_per_day = round(
             expected_portfolio_trades_per_day, 3
         )
@@ -626,7 +657,7 @@ class PaperTradingEngine:
                             else "building_portfolio"
                         )
                         self.state.message = (
-                            f"Paper trading {self.state.strategies} eligible promoted/validated "
+                            f"Paper trading {self.state.strategies} active promoted/validated "
                             f"strateg{'y' if self.state.strategies==1 else 'ies'} from €{self.settings.paper_start_balance:.0f}; "
                             f"strategy hard minimum {self.settings.strategy_min_trades_per_day:g}/day; "
                             f"combined portfolio target {self.state.expected_portfolio_trades_per_day:.1f}/"
@@ -637,7 +668,7 @@ class PaperTradingEngine:
                             if not self.state.running:
                                 break
                             status = str(row.get("status") or "")
-                            if status not in {"active", "retiring"}:
+                            if status not in {"active", "retiring", "review_pause"}:
                                 continue
                             try:
                                 await self._process_strategy(
