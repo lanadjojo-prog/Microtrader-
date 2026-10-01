@@ -10,6 +10,7 @@ from strategy_lab import (
     evaluate_candidate,
     metrics,
     simulate,
+    _regime_ensemble_signal,
 )
 
 
@@ -72,6 +73,45 @@ class ResearchStabilityTests(unittest.TestCase):
         m = metrics(trades)
         self.assertEqual(m["max_win_streak"], 3)
         self.assertEqual(m["max_loss_streak"], 3)
+
+    def test_regime_ensemble_router_is_causal(self):
+        start = datetime(2026, 9, 29, 7, 0, tzinfo=timezone.utc)
+        bars = []
+        price = 1.10
+        for i in range(90):
+            price += 0.00008
+            bars.append(
+                make_bar(
+                    start + timedelta(minutes=i),
+                    price - 0.00003,
+                    price + 0.00015,
+                    price - 0.00015,
+                    price,
+                    100 + (i % 5),
+                )
+            )
+        params = {
+            "regime_atr_short": 14,
+            "regime_atr_long": 50,
+            "regime_vol_ratio": 1.20,
+            "regime_trend_atr": 0.20,
+            "fast": 8,
+            "slow": 30,
+            "pullback_z": 1.0,
+            "breakout_window": 20,
+            "buffer_bps": 2.0,
+            "vwap_window": 60,
+            "z_entry": 1.4,
+        }
+        i = 80
+        a = _regime_ensemble_signal(params, bars, i)
+        future = make_bar(
+            start + timedelta(minutes=90), 2.0, 3.0, 0.5, 2.5, 9999
+        )
+        b = _regime_ensemble_signal(params, bars + [future], i)
+        self.assertEqual(a, b)
+        self.assertIn(a[1], {"trend_pullback", "breakout", "vwap_reversion", "none"})
+        self.assertIn(a[2], {"trend", "expansion", "range", "warmup", "invalid"})
 
     def test_deep_search_freezes_incubator_parameters(self):
         seen = {candidate_signature(c) for c in discovery_candidates()}
