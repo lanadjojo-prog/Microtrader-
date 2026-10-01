@@ -189,10 +189,10 @@ class PaperTradingStore:
                 )
             await conn.commit()
 
-    async def current_loss_streak(self, paper_id: str, lookback: int = 25) -> int:
-        """Consecutive closed losing trades, counting backward from the latest exit."""
+    async def loss_streak_stats(self, paper_id: str) -> tuple[int, int]:
+        """Return (current_loss_streak, max_loss_streak) over full paper history."""
         if not self.enabled:
-            return 0
+            return 0, 0
         async with await psycopg.AsyncConnection.connect(
             self.database_url, row_factory=dict_row
         ) as conn:
@@ -201,19 +201,20 @@ class PaperTradingStore:
                 SELECT pnl
                 FROM microtrader_paper_trades
                 WHERE paper_id=%s
-                ORDER BY exit_time DESC, id DESC
-                LIMIT %s
+                ORDER BY exit_time ASC, id ASC
                 """,
-                (paper_id, max(1, int(lookback))),
+                (paper_id,),
             )
-            streak = 0
+            current = 0
+            maximum = 0
             for row in await cur.fetchall():
                 pnl = float(row["pnl"] or 0.0)
                 if pnl < 0:
-                    streak += 1
-                    continue
-                break
-            return streak
+                    current += 1
+                    maximum = max(maximum, current)
+                else:
+                    current = 0
+            return current, maximum
 
     async def set_error(self, paper_id: str, error: str) -> None:
         if not self.enabled:
