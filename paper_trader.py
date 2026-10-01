@@ -578,13 +578,14 @@ class PaperTradingEngine:
             status = str(row.get("status") or "")
             strategy = str(row.get("strategy") or "")
             open_positions = await self.store.list_positions(paper_id)
-            loss_streak = await self.store.current_loss_streak(paper_id)
+            loss_streak, max_loss_streak = await self.store.loss_streak_stats(paper_id)
             loss_streak_limit = _loss_streak_limit(
                 strategy,
                 self.settings.strategy_max_loss_streak,
                 self.settings.strategy_max_loss_streak_asymmetric,
             )
             row["paper_current_loss_streak"] = loss_streak
+            row["paper_max_loss_streak"] = max_loss_streak
             row["paper_loss_streak_limit"] = loss_streak_limit
 
             # A breached forward-loss streak is a sticky review state. Existing
@@ -592,7 +593,7 @@ class PaperTradingEngine:
             if (
                 paper_id in eligible_ids
                 and status in {"active", "frequency_rejected", "retiring"}
-                and loss_streak > loss_streak_limit
+                and max_loss_streak > loss_streak_limit
             ):
                 if status != "review_pause":
                     await self.store.set_status(paper_id, "review_pause")
