@@ -15,7 +15,7 @@ from forex_store import ForexStrategyStore
 from forex_backtest import FOREX_EVALUATION_POLICY_VERSION
 from paper_store import PaperTradingStore
 from research_store import ResearchStore
-from strategy_lab import RESEARCH_POLICY_VERSION
+from strategy_lab import RESEARCH_POLICY_VERSION, _regime_ensemble_signal
 from market_filters import entry_allowed
 
 log = logging.getLogger("microtrader.paper")
@@ -283,6 +283,10 @@ def _research_signal(strategy: str, params: dict, bars: List[dict], i: int) -> i
         threshold = float(params["buffer_bps"])
         return 1 if edge >= threshold else (-1 if edge <= -threshold else 0)
 
+    if strategy == "regime_ensemble":
+        direction, _, _ = _regime_ensemble_signal(params, bars, i)
+        return direction
+
     if strategy == "asymmetric_breakout":
         window = int(params["window"])
         if i < max(window + 1, 15):
@@ -378,6 +382,12 @@ def _causal_close_entry(
     direction = _signal(strategy, params, closed, i + 1)
     if not direction:
         return None
+    entry_model = None
+    entry_regime = None
+    if strategy == "regime_ensemble":
+        _, entry_model, entry_regime = _regime_ensemble_signal(
+            params, closed, i + 1
+        )
     atr = _atr(closed, i + 1, 14)
     risk_distance = atr * float(params.get("stop_atr", 1.0))
     if risk_distance <= 0:
@@ -389,6 +399,8 @@ def _causal_close_entry(
         "risk_distance": risk_distance,
         "entry_session": session_name,
         "entry_volume_ratio": volume_ratio,
+        "entry_model": entry_model,
+        "entry_regime": entry_regime,
     }
 
 
@@ -403,6 +415,7 @@ class PaperTradingEngine:
         "range_reversal", "trend_pullback", "asymmetric_breakout",
         "momentum", "mean_reversion", "breakout", "extreme_reversal",
         "volatility_breakout", "vwap_reversion", "vwap_momentum",
+        "regime_ensemble",
     }
 
     def __init__(self, settings: Settings, client: CTraderClient):
@@ -889,7 +902,7 @@ class PaperTradingEngine:
             return True
 
         # Research-native signal/max-hold exits are secondary to the 1R stop.
-        if source == "research" and strategy != "asymmetric_breakout":
+        if source == "research" and strategy not in {"asymmetric_breakout", "regime_ensemble"}:
             reason = _research_exit_reason(
                 strategy, params, bars, index, direction
             )
