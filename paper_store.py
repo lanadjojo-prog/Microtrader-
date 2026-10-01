@@ -189,6 +189,32 @@ class PaperTradingStore:
                 )
             await conn.commit()
 
+    async def current_loss_streak(self, paper_id: str, lookback: int = 25) -> int:
+        """Consecutive closed losing trades, counting backward from the latest exit."""
+        if not self.enabled:
+            return 0
+        async with await psycopg.AsyncConnection.connect(
+            self.database_url, row_factory=dict_row
+        ) as conn:
+            cur = await conn.execute(
+                """
+                SELECT pnl
+                FROM microtrader_paper_trades
+                WHERE paper_id=%s
+                ORDER BY exit_time DESC, id DESC
+                LIMIT %s
+                """,
+                (paper_id, max(1, int(lookback))),
+            )
+            streak = 0
+            for row in await cur.fetchall():
+                pnl = float(row["pnl"] or 0.0)
+                if pnl < 0:
+                    streak += 1
+                    continue
+                break
+            return streak
+
     async def set_error(self, paper_id: str, error: str) -> None:
         if not self.enabled:
             return
