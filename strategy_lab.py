@@ -510,6 +510,15 @@ def discovery_candidates() -> List[Candidate]:
             Candidate("extreme_reversal", {**common, "window": 12, "shock_z": 2.0, "max_hold": 12}),
             Candidate("volatility_breakout", {**common, "window": 20, "vol_mult": 1.6, "max_hold": 20}),
             Candidate("trend_pullback", {**common, "fast": 8, "slow": 30, "pullback_z": 1.0, "max_hold": 24}),
+            Candidate("regime_ensemble", {
+                **common,
+                "regime_atr_short": 14, "regime_atr_long": 50,
+                "regime_vol_ratio": 1.20, "regime_trend_atr": 0.55,
+                "fast": 8, "slow": 30, "pullback_z": 1.0,
+                "breakout_window": 20, "buffer_bps": 2.0,
+                "vwap_window": 60, "z_entry": 1.4,
+                "stop_atr": 1.0, "target_r": 2.0, "max_hold": 24,
+            }),
             Candidate("vwap_reversion", {**common, "window": 60, "z_entry": 1.5, "max_hold": 20}),
             Candidate("vwap_momentum", {**common, "window": 60, "buffer_bps": 8.0, "max_hold": 20}),
             Candidate("asymmetric_breakout", {**common, "window": 20, "stop_atr": 0.7, "target_r": 3.0, "max_hold": 40}),
@@ -560,6 +569,21 @@ def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candi
             q[key] = max(1, int(round(nv))) if isinstance(v, int) else round(max(0.01, nv), 4)
             q["_phase"] = phase
             out.append(Candidate(strategy, q))
+
+    if strategy == "regime_ensemble":
+        ensemble_keys = [
+            "regime_vol_ratio", "regime_trend_atr", "pullback_z",
+            "buffer_bps", "z_entry", "target_r",
+        ]
+        for key in ensemble_keys:
+            if key not in base:
+                continue
+            for offset in local_offsets:
+                q = dict(base)
+                v = float(base[key])
+                q[key] = round(max(0.01, v * (1.0 + offset)), 4)
+                q["_phase"] = phase
+                out.append(Candidate(strategy, q))
 
     if strategy == "asymmetric_breakout":
         # Explore asymmetric payoffs densely around the current target as well
@@ -900,6 +924,49 @@ def evaluate_candidate(
     train_metrics = metrics(train_trades, train_days)
     oos_metrics = metrics(oos_trades, oos_days)
     stress_metrics = metrics(stress_oos_trades, oos_days)
+
+    def _breakdown(rows: List[dict], key: str) -> Dict[str, dict]:
+        groups: Dict[str, List[dict]] = {}
+        for trade in rows:
+            label = str(trade.get(key) or "unknown")
+            groups.setdefault(label, []).append(trade)
+        return {label: metrics(group) for label, group in groups.items()}
+
+    entry_model_breakdown = (
+        _breakdown(oos_trades, "entry_model")
+        if candidate.strategy == "regime_ensemble" else {}
+    )
+    regime_breakdown = (
+        _breakdown(oos_trades, "entry_regime")
+        if candidate.strategy == "regime_ensemble" else {}
+    )
+    ensemble_pass = True
+    ensemble_positive_models: List[str] = []
+    ensemble_active_models: List[str] = []
+    ensemble_dominant_share = 0.0
+    if candidate.strategy == "regime_ensemble":
+        total_model_trades = max(1, int(oos_metrics.get("trades") or 0))
+        min_component_trades = 3
+        ensemble_active_models = [
+            name for name, row in entry_model_breakdown.items()
+            if int(row.get("trades") or 0) >= min_component_trades
+        ]
+        ensemble_positive_models = [
+            name for name in ensemble_active_models
+            if float(entry_model_breakdown[name].get("expectancy_bps") or 0.0) > 0
+        ]
+        ensemble_dominant_share = max(
+            [
+                float(row.get("trades") or 0) / total_model_trades
+                for row in entry_model_breakdown.values()
+            ] or [0.0]
+        )
+        ensemble_pass = (
+            len(ensemble_active_models) >= 2
+            and len(ensemble_positive_models) >= 2
+            and ensemble_dominant_share <= 0.90
+        )
+
     positive_symbols = sum(
         1 for row in per_symbol.values()
         if row["oos"]["trades"] > 0 and row["oos"]["expectancy_bps"] > 0
@@ -946,6 +1013,12 @@ def evaluate_candidate(
         reasons.append(
             f"final holdout has fewer than {MIN_DEEP_OOS_DAYS} trading days"
         )
+    if candidate.strategy == "regime_ensemble" and not ensemble_pass:
+        reasons.append(
+            "regime ensemble lacks robust multi-entry contribution "
+            f"(active={len(ensemble_active_models)}, positive={len(ensemble_positive_models)}, "
+            f"dominant_share={ensemble_dominant_share:.0%})"
+        )
 
     raw_pass = not reasons
     score = funnel_score(
@@ -959,6 +1032,7 @@ def evaluate_candidate(
     discovery_ok = (
         hard_frequency_pass
         and streak_pass
+        and ensemble_pass
         and oos_metrics["trades"] >= 15
         and (
             oos_metrics["expectancy_bps"] > 0
@@ -969,6 +1043,7 @@ def evaluate_candidate(
     incubator_ok = (
         hard_frequency_pass
         and streak_pass
+        and ensemble_pass
         and oos_metrics["trades"] >= max(20, min_oos_trades // 2)
         and oos_metrics["expectancy_bps"] > 0
         and oos_metrics["profit_factor"] >= 1.20
@@ -1023,6 +1098,15 @@ def evaluate_candidate(
             "max_win_streak_observed": int(oos_metrics.get("max_win_streak") or 0),
             "passed": streak_pass,
         },
+        "entry_model_breakdown": entry_model_breakdown,
+        "regime_breakdown": regime_breakdown,
+        "ensemble_policy": {
+            "applies": candidate.strategy == "regime_ensemble",
+            "passed": ensemble_pass,
+            "active_models": ensemble_active_models,
+            "positive_models": ensemble_positive_models,
+            "dominant_trade_share": round(ensemble_dominant_share, 3),
+        },
     }
 
 
@@ -1068,6 +1152,8 @@ def simulate(
         return _simulate_volatility_breakout(candidate, symbol, bars, cost_bps)
     if candidate.strategy == "trend_pullback":
         return _simulate_trend_pullback(candidate, symbol, bars, cost_bps)
+    if candidate.strategy == "regime_ensemble":
+        return _simulate_regime_ensemble(candidate, symbol, bars, cost_bps)
     if candidate.strategy == "vwap_reversion":
         return _simulate_vwap_reversion(candidate, symbol, bars, cost_bps)
     if candidate.strategy == "vwap_momentum":
@@ -1254,6 +1340,141 @@ def _simulate_trend_pullback(candidate: Candidate, symbol: str, bars: List[dict]
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1)
         trades.append(_trade(symbol,bars[e],bars[x],float(bars[e]["o"]),float(bars[x]["o"]),cost_bps,direction=direction)); i=x+1
     return trades
+
+
+def _regime_ensemble_signal(params: dict, bars: List[dict], i: int) -> tuple[int, str, str]:
+    """Causal regime router: returns (direction, entry_model, regime).
+
+    The router uses only bars strictly before entry index i. It chooses a
+    deterministic entry model; no agent/model is allowed to pick trades after
+    seeing their outcome.
+    """
+    atr_short_n = int(params.get("regime_atr_short", 14))
+    atr_long_n = int(params.get("regime_atr_long", 50))
+    slow = int(params.get("slow", 30))
+    fast = int(params.get("fast", 8))
+    breakout_window = int(params.get("breakout_window", 20))
+    vwap_window = int(params.get("vwap_window", 60))
+    need = max(atr_long_n + 1, slow, breakout_window + 1, vwap_window)
+    if i < need:
+        return 0, "none", "warmup"
+
+    atr_short = _atr(bars, i, atr_short_n)
+    atr_long = _atr(bars, i, atr_long_n)
+    if atr_short <= 0 or atr_long <= 0:
+        return 0, "none", "invalid"
+
+    closes = [float(x["c"]) for x in bars[i-slow:i]]
+    fast_ma = mean(closes[-fast:])
+    slow_ma = mean(closes)
+    trend_strength = abs(fast_ma - slow_ma) / atr_long
+    vol_ratio = atr_short / atr_long
+
+    # 1) Volatility expansion -> price breakout entry.
+    if vol_ratio >= float(params.get("regime_vol_ratio", 1.20)):
+        prior = bars[i-breakout_window-1:i-1]
+        if not prior:
+            return 0, "breakout", "expansion"
+        px = float(bars[i-1]["c"])
+        buf = float(params.get("buffer_bps", 2.0)) / 10_000.0
+        hi = max(float(x["h"]) for x in prior) * (1.0 + buf)
+        lo = min(float(x["l"]) for x in prior) * (1.0 - buf)
+        direction = 1 if px > hi else (-1 if px < lo else 0)
+        return direction, "breakout", "expansion"
+
+    # 2) Directional market -> pullback entry in prevailing trend.
+    if trend_strength >= float(params.get("regime_trend_atr", 0.55)):
+        sd = pstdev(closes)
+        z = (closes[-1] - fast_ma) / sd if sd > 0 else 0.0
+        threshold = float(params.get("pullback_z", 1.0))
+        direction = (
+            1 if (fast_ma > slow_ma and z <= -threshold)
+            else (-1 if (fast_ma < slow_ma and z >= threshold) else 0)
+        )
+        return direction, "trend_pullback", "trend"
+
+    # 3) Quiet/ranging market -> VWAP mean-reversion entry.
+    vw = _rolling_vwap(bars, i-vwap_window, i)
+    range_closes = [float(x["c"]) for x in bars[i-vwap_window:i]]
+    sd = pstdev(range_closes)
+    z = (range_closes[-1] - vw) / sd if sd > 0 else 0.0
+    threshold = float(params.get("z_entry", 1.4))
+    direction = 1 if z <= -threshold else (-1 if z >= threshold else 0)
+    return direction, "vwap_reversion", "range"
+
+
+def _simulate_regime_ensemble(
+    candidate: Candidate,
+    symbol: str,
+    bars: List[dict],
+    cost_bps: float,
+) -> List[dict]:
+    """Common risk/exit model, varying only the regime-routed entry model."""
+    p = candidate.params
+    warmup = max(
+        int(p.get("regime_atr_long", 50)) + 1,
+        int(p.get("slow", 30)),
+        int(p.get("breakout_window", 20)) + 1,
+        int(p.get("vwap_window", 60)),
+    )
+    trades: List[dict] = []
+    i = warmup
+    while i < len(bars) - 2:
+        if not _entry_ok(p, bars, i):
+            i += 1
+            continue
+        direction, entry_model, regime = _regime_ensemble_signal(p, bars, i)
+        if not direction:
+            i += 1
+            continue
+
+        entry = float(bars[i]["o"])
+        atr = _atr(bars, i, 14)
+        if atr <= 0:
+            i += 1
+            continue
+        risk = atr * float(p.get("stop_atr", 1.0))
+        target_r = float(p.get("target_r", 2.0))
+        stop = entry - risk if direction > 0 else entry + risk
+        target = entry + risk * target_r if direction > 0 else entry - risk * target_r
+
+        e = i
+        x = min(e + int(p.get("max_hold", 24)), len(bars) - 1)
+        exit_price = float(bars[x]["o"])
+        r_mult = None
+        exit_reason = "max_hold"
+        for j in range(e, x + 1):
+            lo = float(bars[j]["l"])
+            hi = float(bars[j]["h"])
+            stop_hit = (lo <= stop) if direction > 0 else (hi >= stop)
+            target_hit = (hi >= target) if direction > 0 else (lo <= target)
+            # Conservative same-bar assumption: stop is evaluated first.
+            if stop_hit:
+                exit_price = stop
+                x = j
+                r_mult = -1.0
+                exit_reason = "stop"
+                break
+            if target_hit:
+                exit_price = target
+                x = j
+                r_mult = target_r
+                exit_reason = "target"
+                break
+        if r_mult is None:
+            r_mult = direction * (exit_price - entry) / risk if risk > 0 else 0.0
+
+        trade = _trade(
+            symbol, bars[e], bars[x], entry, exit_price, cost_bps,
+            r_mult, direction=direction,
+        )
+        trade["entry_model"] = entry_model
+        trade["entry_regime"] = regime
+        trade["exit_reason"] = exit_reason
+        trades.append(trade)
+        i = x + 1
+    return trades
+
 
 def _rolling_vwap(bars: List[dict], a: int, b: int) -> float:
     pv=0.0; vol=0.0
