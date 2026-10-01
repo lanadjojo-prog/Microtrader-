@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from paper_trader import _causal_close_entry, _research_signal, _research_exit_reason, _max_loss_stop_price
+from paper_trader import _causal_close_entry, _research_signal, _research_exit_reason, _max_loss_stop_price, _loss_streak_limit
 
 
 def bar(ts, o, h, l, c, v=100):
@@ -102,6 +102,11 @@ class PaperForwardTests(unittest.TestCase):
         net = gross - (2.0 * cost_bps / 10_000.0)
         r_multiple = net / (risk_distance / entry)
         self.assertAlmostEqual(r_multiple, -1.0, places=8)
+
+    def test_loss_streak_limit_is_looser_only_for_asymmetric_breakout(self):
+        self.assertEqual(_loss_streak_limit("trend_pullback", 5, 7), 5)
+        self.assertEqual(_loss_streak_limit("extreme_reversal", 5, 7), 5)
+        self.assertEqual(_loss_streak_limit("asymmetric_breakout", 5, 7), 7)
 
     def test_entry_decision_has_no_future_bar_dependency(self):
         start = datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)
