@@ -695,6 +695,7 @@ class PaperTradingEngine:
     async def _process_strategy(self, row: dict, *, allow_entries: bool = True) -> None:
         paper_id = str(row["paper_id"])
         strategy = str(row["strategy"])
+        strategy_status = str(row.get("status") or "")
         params = dict(row.get("params") or {})
         pairs = list(row.get("pairs") or self.settings.forex_pairs)
         tf = int(row.get("timeframe_min") or params.get("timeframe_min") or 1)
@@ -789,7 +790,10 @@ class PaperTradingEngine:
                 cursors[pair] = str(bar["t"])
 
         await self.store.touch_daily(paper_id, len(positions))
-        if not allow_entries and not positions:
+        # Retiring means "no longer eligible; manage open positions only".
+        # Once those positions are gone it may become frequency_rejected.
+        # review_pause is intentionally sticky and must never be overwritten here.
+        if not allow_entries and not positions and strategy_status == "retiring":
             await self.store.set_status(paper_id, "frequency_rejected")
 
     def _maybe_protect_stop(self, pos: dict, bar: dict, params: dict) -> bool:
