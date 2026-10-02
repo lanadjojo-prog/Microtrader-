@@ -197,7 +197,7 @@ class ResearchAgent:
             ]
             tf_policy = build_adaptive_policy(
                 tf_results,
-                min_context_trades=4,
+                min_context_trades=8,
                 max_entries_per_context=3,
             )
             if tf_policy.get("routes"):
@@ -271,12 +271,16 @@ class ResearchAgent:
         )
         self._commit_decision(decision, hypotheses)
         log.info(
-            "Research Agent cycle=%s mode=%s focus_families=%s focus_timeframes=%s hypotheses=%s",
+            "Research Agent cycle=%s mode=%s focus_families=%s focus_timeframes=%s "
+            "hypotheses=%s adaptive_contexts=%s adaptive_specialists=%s adaptive_evidence_rows=%s",
             self.state.cycles,
             mode,
             ",".join(focus_families) or "-",
             ",".join(str(x) for x in focus_timeframes) or "-",
             len(hypotheses),
+            int(adaptive_policy.get("contexts") or 0),
+            int(adaptive_policy.get("specialists") or 0),
+            int(adaptive_policy.get("evidence_rows") or 0),
         )
         await self._persist_decision(decision, hypotheses)
 
