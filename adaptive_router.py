@@ -359,10 +359,40 @@ def _evidence_score(metrics: dict, stress: dict, funnel_score: float) -> float:
     return round(robustness + quality + sample * 8.0 + float(funnel_score) * 0.04 - loss_streak * 0.4, 4)
 
 
+def execution_policy(policy: dict) -> dict:
+    """Return only routing fields that can change trading decisions.
+
+    Evidence counters/scores stay in the Research Agent state, but are excluded
+    from candidate params so harmless score updates do not create a brand-new
+    backtest signature.
+    """
+    routes = {}
+    for ctx, rows in dict(policy.get("routes") or {}).items():
+        compact = []
+        for row in list(rows or []):
+            compact.append({
+                "entry_model": str(row.get("entry_model") or ""),
+                "entry_params": dict(row.get("entry_params") or {}),
+                "source_strategy": str(
+                    row.get("source_strategy") or row.get("entry_model") or ""
+                ),
+            })
+        if compact:
+            routes[str(ctx)] = compact
+    return {
+        "version": str(policy.get("version") or ADAPTIVE_CONTEXT_VERSION),
+        "routes": routes,
+        "exit_profiles": {
+            str(key): dict(value or {})
+            for key, value in dict(policy.get("exit_profiles") or {}).items()
+        },
+    }
+
+
 def build_adaptive_policy(
     results: List[dict],
     *,
-    min_context_trades: int = 4,
+    min_context_trades: int = 8,
     max_entries_per_context: int = 3,
 ) -> dict:
     """Build a specialist policy from context-labelled OOS evidence.
@@ -402,9 +432,15 @@ def build_adaptive_policy(
             exp = float(met.get("expectancy_bps") or 0.0)
             pf = float(met.get("profit_factor") or 0.0)
             stress_exp = float(stress.get("expectancy_bps") or 0.0)
+            stress_pf = float(stress.get("profit_factor") or 0.0)
+            stress_trades = int(stress.get("trades") or 0)
             if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.02:
                 continue
-            if stress and stress_exp <= -2.0:
+            if (
+                stress
+                and stress_trades >= int(min_context_trades)
+                and (stress_exp <= 0.0 or stress_pf < 1.0)
+            ):
                 continue
             entry_candidates.setdefault(ctx, []).append({
                 "entry_model": model or source_strategy,
@@ -432,7 +468,16 @@ def build_adaptive_policy(
             trades = int(met.get("trades") or 0)
             exp = float(met.get("expectancy_bps") or 0.0)
             pf = float(met.get("profit_factor") or 0.0)
+            stress_exp = float(stress.get("expectancy_bps") or 0.0)
+            stress_pf = float(stress.get("profit_factor") or 0.0)
+            stress_trades = int(stress.get("trades") or 0)
             if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.02:
+                continue
+            if (
+                stress
+                and stress_trades >= int(min_context_trades)
+                and (stress_exp <= 0.0 or stress_pf < 1.0)
+            ):
                 continue
             profile = dict(profiles.get(label) or {})
             if not profile:
