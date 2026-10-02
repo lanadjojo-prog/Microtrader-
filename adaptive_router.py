@@ -376,6 +376,12 @@ def build_adaptive_policy(
     evidence_rows = 0
 
     for row in results:
+        # The adaptive policy is a research artifact. Never let final deep-search
+        # holdout outcomes leak back into routing decisions that will later be
+        # measured on that same holdout.
+        phase = str((row.get("params") or {}).get("_phase") or "discovery")
+        if phase not in {"discovery", "incubator"}:
+            continue
         diag = dict(row.get("adaptive_diagnostics") or {})
         entry_breakdown = dict(diag.get("context_entry_breakdown") or {})
         stress_entry = dict(diag.get("stress_context_entry_breakdown") or {})
@@ -479,4 +485,6 @@ def build_adaptive_policy(
         "specialists": total_specialists,
         "min_context_trades": int(min_context_trades),
         "max_entries_per_context": int(max_entries_per_context),
+        "evidence_phases": ["discovery", "incubator"],
+        "final_holdout_excluded": True,
     }
