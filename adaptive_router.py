@@ -387,6 +387,9 @@ def build_adaptive_policy(
 
         for combo, met in entry_breakdown.items():
             ctx, model = _split_combo_key(str(combo))
+            regime = ctx.split("|", 1)[0]
+            if regime not in {"expansion", "trend", "range"}:
+                continue
             met = dict(met or {})
             stress = dict(stress_entry.get(combo) or {})
             trades = int(met.get("trades") or 0)
@@ -415,6 +418,9 @@ def build_adaptive_policy(
         profiles = dict(diag.get("exit_profiles") or {})
         for combo, met in exit_breakdown.items():
             ctx, label = _split_combo_key(str(combo))
+            regime = ctx.split("|", 1)[0]
+            if regime not in {"expansion", "trend", "range"}:
+                continue
             met = dict(met or {})
             stress = dict(stress_exit.get(combo) or {})
             trades = int(met.get("trades") or 0)
