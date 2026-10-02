@@ -91,6 +91,32 @@ class AdaptiveRouterTests(unittest.TestCase):
             "trend_pullback",
         )
 
+    def test_policy_never_learns_from_final_holdout_rows(self):
+        results = [{
+            "strategy": "trend_pullback",
+            "params": {
+                "_phase": "deep_search",
+                "fast": 8,
+                "slow": 30,
+                "pullback_z": 1.0,
+            },
+            "funnel_score": 99.0,
+            "adaptive_diagnostics": {
+                "context_entry_breakdown": {
+                    "trend|London||trend_pullback": {
+                        "trades": 100,
+                        "expectancy_bps": 20.0,
+                        "profit_factor": 3.0,
+                        "max_loss_streak": 1,
+                    }
+                },
+                "stress_context_entry_breakdown": {},
+            },
+        }]
+        policy = build_adaptive_policy(results, min_context_trades=4)
+        self.assertEqual(policy["routes"], {})
+        self.assertTrue(policy["final_holdout_excluded"])
+
     def test_adaptive_signal_uses_policy_for_current_context(self):
         bars = _bars()
         base = {
