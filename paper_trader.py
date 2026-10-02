@@ -17,6 +17,7 @@ from paper_store import PaperTradingStore
 from research_store import ResearchStore
 from strategy_lab import RESEARCH_POLICY_VERSION, _regime_ensemble_signal
 from market_filters import entry_allowed
+from adaptive_router import ADAPTIVE_CONTEXT_VERSION, adaptive_signal
 
 log = logging.getLogger("microtrader.paper")
 
@@ -379,17 +380,30 @@ def _causal_close_entry(
     )
     if not allowed:
         return None
-    direction = _signal(strategy, params, closed, i + 1)
-    if not direction:
-        return None
     entry_model = None
     entry_regime = None
-    if strategy == "regime_ensemble":
-        _, entry_model, entry_regime = _regime_ensemble_signal(
-            params, closed, i + 1
+    entry_context = {}
+    exit_profile = {}
+    route_meta = {}
+
+    if strategy == "adaptive_router":
+        direction, entry_model, entry_context, exit_profile, route_meta = adaptive_signal(
+            params, decision_bars, decision_idx
         )
+        entry_regime = str(entry_context.get("regime") or "unknown")
+    else:
+        direction = _signal(strategy, params, closed, i + 1)
+        if strategy == "regime_ensemble" and direction:
+            _, entry_model, entry_regime = _regime_ensemble_signal(
+                params, closed, i + 1
+            )
+
+    if not direction:
+        return None
+
     atr = _atr(closed, i + 1, 14)
-    risk_distance = atr * float(params.get("stop_atr", 1.0))
+    stop_atr = float(exit_profile.get("stop_atr", params.get("stop_atr", 1.0)))
+    risk_distance = atr * stop_atr
     if risk_distance <= 0:
         return None
     return {
@@ -399,8 +413,22 @@ def _causal_close_entry(
         "risk_distance": risk_distance,
         "entry_session": session_name,
         "entry_volume_ratio": volume_ratio,
-        "entry_model": entry_model,
+        "entry_model": entry_model or strategy,
         "entry_regime": entry_regime,
+        "entry_context": entry_context,
+        "exit_model": (
+            str(exit_profile.get("name") or "adaptive_rr")
+            if strategy == "adaptive_router" else None
+        ),
+        "target_r_override": (
+            float(exit_profile.get("target_r"))
+            if exit_profile.get("target_r") is not None else None
+        ),
+        "max_hold_override": (
+            int(exit_profile.get("max_hold"))
+            if exit_profile.get("max_hold") is not None else None
+        ),
+        "route_evidence_score": float(route_meta.get("evidence_score") or 0.0),
     }
 
 
@@ -415,7 +443,7 @@ class PaperTradingEngine:
         "range_reversal", "trend_pullback", "asymmetric_breakout",
         "momentum", "mean_reversion", "breakout", "extreme_reversal",
         "volatility_breakout", "vwap_reversion", "vwap_momentum",
-        "regime_ensemble",
+        "regime_ensemble", "adaptive_router",
     }
 
     def __init__(self, settings: Settings, client: CTraderClient):
@@ -451,6 +479,7 @@ class PaperTradingEngine:
             "portfolio target >=10/day combined"
         )
         payload["paper_sources"] = ["forex_promoted", "research_promoted_17of17_validated"]
+        payload["adaptive_context_version"] = ADAPTIVE_CONTEXT_VERSION
         return payload
 
     async def start(self) -> None:
@@ -772,7 +801,11 @@ class PaperTradingEngine:
                         direction = int(decision["direction"])
                         entry = float(decision["entry_price"])
                         risk_distance = float(decision["risk_distance"])
-                        target_r = float(params.get("target_r", 2.0))
+                        target_r = float(
+                            decision.get("target_r_override")
+                            if decision.get("target_r_override") is not None
+                            else params.get("target_r", 2.0)
+                        )
                         risk_eur = float(self.settings.paper_risk_eur)
                         stop = _max_loss_stop_price(
                             entry=entry,
@@ -902,7 +935,7 @@ class PaperTradingEngine:
             return True
 
         # Research-native signal/max-hold exits are secondary to the 1R stop.
-        if source == "research" and strategy not in {"asymmetric_breakout", "regime_ensemble"}:
+        if source == "research" and strategy not in {"asymmetric_breakout", "regime_ensemble", "adaptive_router"}:
             reason = _research_exit_reason(
                 strategy, params, bars, index, direction
             )
@@ -930,7 +963,12 @@ class PaperTradingEngine:
         self._maybe_protect_stop(pos, bar, params)
 
         held = int(pos.get("bars_held", 0)) + 1
-        if held >= int(params.get("max_hold", 36)):
+        max_hold = int(
+            pos.get("max_hold_override")
+            if pos.get("max_hold_override") is not None
+            else params.get("max_hold", 36)
+        )
+        if held >= max_hold:
             await self._close(
                 paper_id, pair, pos, bar, float(bar["c"]), "max_hold"
             )
@@ -988,5 +1026,13 @@ class PaperTradingEngine:
             risk_eur=risk_eur,
             r_multiple=round(r_multiple, 6),
             pnl=round(pnl, 6),
+            entry_model=pos.get("entry_model"),
+            entry_regime=pos.get("entry_regime"),
+            entry_context=dict(pos.get("entry_context") or {}),
+            exit_model=pos.get("exit_model"),
+            route_evidence_score=(
+                float(pos["route_evidence_score"])
+                if pos.get("route_evidence_score") is not None else None
+            ),
         )
         await self.store.delete_position(paper_id, pair)
