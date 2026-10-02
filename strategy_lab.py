@@ -717,6 +717,8 @@ def _context_backfill_candidates(
         params = dict(row.get("params") or {})
         if not params:
             continue
+        if str(params.get("_policy_version") or "") != RESEARCH_POLICY_VERSION:
+            continue
         # Context backfill deliberately stays on pre-holdout discovery data.
         params["_phase"] = "discovery"
         params["_policy_version"] = RESEARCH_POLICY_VERSION
