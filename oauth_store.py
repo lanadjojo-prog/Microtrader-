@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict
 import psycopg
+from db_connection import connect_db
 from psycopg.rows import dict_row
 
 
@@ -18,7 +19,7 @@ class CTraderTokenStore:
     async def init(self) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_ctrader_tokens (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -37,7 +38,7 @@ class CTraderTokenStore:
     async def save(self, access_token: str, refresh_token: str) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute("""
                 UPDATE microtrader_ctrader_tokens
                 SET access_token=%s, refresh_token=%s, updated_at=NOW()
@@ -48,7 +49,7 @@ class CTraderTokenStore:
     async def load(self) -> Dict[str, str]:
         if not self.enabled:
             return {"access_token": "", "refresh_token": ""}
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, row_factory=dict_row
         ) as conn:
             cur = await conn.execute("""

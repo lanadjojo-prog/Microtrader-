@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 import psycopg
+from db_connection import connect_db
 from psycopg.rows import dict_row
 
 
@@ -18,7 +19,7 @@ class ForexResearchStore:
     async def init(self) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_forex_research_strategy_results (
                     signature TEXT PRIMARY KEY,
@@ -65,7 +66,7 @@ class ForexResearchStore:
     async def save_result(self, signature: str, result: Dict[str, Any]) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 """
                 INSERT INTO microtrader_forex_research_strategy_results (
@@ -225,7 +226,7 @@ class ForexResearchStore:
         """
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, connect_timeout=5
         ) as conn:
             await conn.execute(
@@ -299,7 +300,7 @@ class ForexResearchStore:
     async def save_state(self, generation: int, tested_total: int, promoted_total: int) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 """
                 UPDATE microtrader_forex_research_strategy_state
@@ -313,7 +314,7 @@ class ForexResearchStore:
     async def load_state(self) -> Dict[str, int]:
         if not self.enabled:
             return {"generation": 0, "tested_total": 0, "promoted_total": 0}
-        async with await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row) as conn:
+        async with connect_db(self.database_url, row_factory=dict_row) as conn:
             cur = await conn.execute(
                 "SELECT generation, tested_total, promoted_total FROM microtrader_forex_research_strategy_state WHERE id=1"
             )
@@ -323,7 +324,7 @@ class ForexResearchStore:
     async def load_results(self, limit: int = 250) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
-        async with await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row) as conn:
+        async with connect_db(self.database_url, row_factory=dict_row) as conn:
             cur = await conn.execute(
                 """
                 SELECT signature, strategy, params, promoted, rejection_reasons,
@@ -358,7 +359,7 @@ class ForexResearchStore:
         """
         if not self.enabled:
             return []
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, row_factory=dict_row
         ) as conn:
             cur = await conn.execute(
@@ -407,7 +408,7 @@ class ForexResearchStore:
         """
         if not self.enabled:
             return []
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, row_factory=dict_row
         ) as conn:
             cur = await conn.execute(
@@ -438,7 +439,7 @@ class ForexResearchStore:
     async def load_signatures(self) -> set[str]:
         if not self.enabled:
             return set()
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             cur = await conn.execute(
                 "SELECT signature FROM microtrader_forex_research_strategy_results"
             )

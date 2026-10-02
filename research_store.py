@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 import psycopg
+from db_connection import connect_db
 from psycopg.rows import dict_row
 
 
@@ -17,7 +18,7 @@ class ResearchStore:
     async def init(self) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_research_lab_results (
                     lab_name TEXT PRIMARY KEY,
@@ -41,7 +42,7 @@ class ResearchStore:
     async def save(self, lab_name: str, status: str, result: Dict[str, Any]) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute("""
                 INSERT INTO microtrader_research_lab_results (lab_name,status,result,updated_at)
                 VALUES (%s,%s,%s::jsonb,NOW())
@@ -63,7 +64,7 @@ class ResearchStore:
     ) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 """
                 INSERT INTO microtrader_research_validations (
@@ -89,7 +90,7 @@ class ResearchStore:
     async def load_validated_signatures(self) -> set[str]:
         if not self.enabled:
             return set()
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             cur = await conn.execute(
                 """
                 SELECT candidate_signature
@@ -116,7 +117,7 @@ class ResearchStore:
         """
         if not self.enabled:
             return []
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, row_factory=dict_row
         ) as conn:
             cur = await conn.execute(
@@ -152,7 +153,7 @@ class ResearchStore:
     async def load_all(self) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
-        async with await psycopg.AsyncConnection.connect(self.database_url,row_factory=dict_row) as conn:
+        async with connect_db(self.database_url, row_factory=dict_row) as conn:
             cur=await conn.execute("""
                 SELECT lab_name,status,result,updated_at
                 FROM microtrader_research_lab_results

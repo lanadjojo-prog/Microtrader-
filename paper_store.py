@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List
 
 import psycopg
+from db_connection import connect_db
 from psycopg.rows import dict_row
 
 
@@ -18,7 +19,7 @@ class PaperTradingStore:
     async def init(self) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_paper_strategies (
                     paper_id TEXT PRIMARY KEY,
@@ -129,7 +130,7 @@ class PaperTradingStore:
     ) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 """
                 INSERT INTO microtrader_paper_strategies (
@@ -150,7 +151,7 @@ class PaperTradingStore:
     async def list_strategies(self) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, row_factory=dict_row
         ) as conn:
             cur = await conn.execute(
@@ -167,7 +168,7 @@ class PaperTradingStore:
     async def set_cursor(self, paper_id: str, pair: str, bar_time: str) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             cur = await conn.execute(
                 "SELECT last_bar_times FROM microtrader_paper_strategies WHERE paper_id=%s",
                 (paper_id,),
@@ -188,7 +189,7 @@ class PaperTradingStore:
     async def set_status(self, paper_id: str, status: str) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 """
                 UPDATE microtrader_paper_strategies
@@ -208,7 +209,7 @@ class PaperTradingStore:
         """Return (current_loss_streak, max_loss_streak) over full paper history."""
         if not self.enabled:
             return 0, 0
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, row_factory=dict_row
         ) as conn:
             cur = await conn.execute(
@@ -234,7 +235,7 @@ class PaperTradingStore:
     async def set_error(self, paper_id: str, error: str) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 """
                 UPDATE microtrader_paper_strategies
@@ -248,7 +249,7 @@ class PaperTradingStore:
     async def list_positions(self, paper_id: str) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, row_factory=dict_row
         ) as conn:
             cur = await conn.execute(
@@ -269,7 +270,7 @@ class PaperTradingStore:
     async def upsert_position(self, paper_id: str, pair: str, position: dict) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 """
                 INSERT INTO microtrader_paper_positions (
@@ -342,7 +343,7 @@ class PaperTradingStore:
     ) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 """
                 UPDATE microtrader_paper_positions
@@ -362,7 +363,7 @@ class PaperTradingStore:
     async def delete_position(self, paper_id: str, pair: str) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             await conn.execute(
                 "DELETE FROM microtrader_paper_positions WHERE paper_id=%s AND pair=%s",
                 (paper_id, pair),
@@ -391,7 +392,7 @@ class PaperTradingStore:
     ) -> float:
         if not self.enabled:
             return 0.0
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             cur = await conn.execute(
                 "SELECT balance FROM microtrader_paper_strategies WHERE paper_id=%s FOR UPDATE",
                 (paper_id,),
@@ -462,7 +463,7 @@ class PaperTradingStore:
     async def touch_daily(self, paper_id: str, open_positions: int) -> None:
         if not self.enabled:
             return
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with connect_db(self.database_url) as conn:
             cur = await conn.execute(
                 "SELECT balance FROM microtrader_paper_strategies WHERE paper_id=%s",
                 (paper_id,),
@@ -488,7 +489,7 @@ class PaperTradingStore:
     async def dashboard(self, daily_limit: int = 60, trade_limit: int = 150) -> Dict[str, Any]:
         if not self.enabled:
             return {"strategies": [], "daily": [], "trades": [], "positions": []}
-        async with await psycopg.AsyncConnection.connect(
+        async with connect_db(
             self.database_url, row_factory=dict_row
         ) as conn:
             strategies = [
