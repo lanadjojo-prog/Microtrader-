@@ -185,13 +185,46 @@ class ResearchAgent:
         focus_families = [x["family"] for x in focus]
         focus_timeframes = [int(x["timeframe"]) for x in tf_summary[:2] if int(x["timeframe"]) in (1, 5)] or [1, 5]
         hypotheses = self._make_hypotheses(focus, tf_summary, results)
-        adaptive_policy = build_adaptive_policy(
-            results,
-            min_context_trades=4,
-            max_entries_per_context=3,
+
+        # Keep specialist evidence strictly timeframe-local. A 5m parameter set
+        # must never become a 1m route merely because the regime/session label
+        # happens to match.
+        timeframe_policies = {}
+        for tf in (1, 5):
+            tf_results = [
+                row for row in results
+                if int((row.get("params") or {}).get("timeframe_min") or 0) == tf
+            ]
+            tf_policy = build_adaptive_policy(
+                tf_results,
+                min_context_trades=4,
+                max_entries_per_context=3,
+            )
+            if tf_policy.get("routes"):
+                timeframe_policies[str(tf)] = tf_policy
+
+        adaptive_policy = {
+            "version": ADAPTIVE_CONTEXT_VERSION,
+            "timeframes": timeframe_policies,
+            "contexts": sum(
+                int(policy.get("contexts") or 0)
+                for policy in timeframe_policies.values()
+            ),
+            "specialists": sum(
+                int(policy.get("specialists") or 0)
+                for policy in timeframe_policies.values()
+            ),
+            "evidence_rows": sum(
+                int(policy.get("evidence_rows") or 0)
+                for policy in timeframe_policies.values()
+            ),
+            "final_holdout_excluded": True,
+        }
+        route_count = sum(
+            len(dict(policy.get("routes") or {}))
+            for policy in timeframe_policies.values()
         )
-        adaptive_routes = dict(adaptive_policy.get("routes") or {})
-        if adaptive_routes:
+        if route_count:
             hypotheses.insert(0, {
                 "family": "adaptive_router",
                 "timeframe_min": None,
@@ -201,7 +234,7 @@ class ResearchAgent:
                 "win_rate_pct": None,
                 "payoff_ratio": None,
                 "thesis": (
-                    f"Adaptive router has {len(adaptive_routes)} market-context routes "
+                    f"Adaptive router has {route_count} timeframe-specific market-context routes "
                     f"and {int(adaptive_policy.get('specialists') or 0)} validated entry specialists; "
                     "test entry selection and exit profiles independently OOS."
                 ),
@@ -221,7 +254,12 @@ class ResearchAgent:
                 "contexts": int(adaptive_policy.get("contexts") or 0),
                 "specialists": int(adaptive_policy.get("specialists") or 0),
                 "evidence_rows": int(adaptive_policy.get("evidence_rows") or 0),
-                "route_keys": sorted(adaptive_routes.keys()),
+                "route_keys": sorted(
+                    f"{tf}m:{key}"
+                    for tf, policy in timeframe_policies.items()
+                    for key in dict(policy.get("routes") or {}).keys()
+                ),
+                "timeframes": sorted(int(tf) for tf in timeframe_policies),
             },
         }
 
