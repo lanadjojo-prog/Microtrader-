@@ -145,6 +145,45 @@ class ResearchStabilityTests(unittest.TestCase):
         self.assertEqual(batch[0].params["z_entry"], 1.7)
         self.assertEqual(batch[0].params["_phase"], "deep_search")
 
+    def test_adaptive_policy_is_injected_per_timeframe(self):
+        seen = {candidate_signature(c) for c in discovery_candidates()}
+        focus = {
+            "timeframes": [1, 5],
+            "adaptive_policy": {
+                "timeframes": {
+                    "1": {
+                        "routes": {
+                            "trend|London": [{
+                                "entry_model": "momentum",
+                                "entry_params": {"fast": 3, "slow": 12, "entry_bps": 4.0},
+                            }]
+                        },
+                        "exit_profiles": {},
+                    },
+                    "5": {
+                        "routes": {
+                            "trend|London": [{
+                                "entry_model": "trend_pullback",
+                                "entry_params": {"fast": 8, "slow": 30, "pullback_z": 1.0},
+                            }]
+                        },
+                        "exit_profiles": {},
+                    },
+                }
+            },
+        }
+        batch = choose_batch([], seen, generation=20, batch_size=10, focus=focus)
+        self.assertEqual({c.params["timeframe_min"] for c in batch}, {1, 5})
+        by_tf = {c.params["timeframe_min"]: c for c in batch}
+        self.assertEqual(
+            by_tf[1].params["adaptive_policy"]["routes"]["trend|London"][0]["entry_model"],
+            "momentum",
+        )
+        self.assertEqual(
+            by_tf[5].params["adaptive_policy"]["routes"]["trend|London"][0]["entry_model"],
+            "trend_pullback",
+        )
+
     def test_deep_search_is_terminal(self):
         start = datetime(2026, 8, 3, 7, 0, tzinfo=timezone.utc)
         bars = []
