@@ -686,6 +686,49 @@ def _round_robin_candidates(
     return out
 
 
+def _context_backfill_candidates(
+    results: List[dict],
+    seen: set[str],
+) -> List[Candidate]:
+    """Re-run historical configurations to recover context-level evidence.
+
+    Old aggregate rows do not contain the per-trade context needed by the new
+    router. Re-evaluate the same trading parameters on the pre-holdout
+    discovery slice, including historically rejected configurations: a model
+    that is weak globally may still be a useful specialist in one regime.
+    """
+    rows = sorted(
+        results,
+        key=lambda row: (
+            float(row.get("funnel_score") or 0.0),
+            float((row.get("oos") or {}).get("trades") or 0.0),
+        ),
+        reverse=True,
+    )
+    out: List[Candidate] = []
+    local_seen: set[str] = set()
+    for row in rows:
+        strategy = str(row.get("strategy") or "")
+        if not strategy or strategy == "adaptive_router":
+            continue
+        diagnostics = dict(row.get("adaptive_diagnostics") or {})
+        if diagnostics.get("context_entry_breakdown"):
+            continue
+        params = dict(row.get("params") or {})
+        if not params:
+            continue
+        # Context backfill deliberately stays on pre-holdout discovery data.
+        params["_phase"] = "discovery"
+        params["_policy_version"] = RESEARCH_POLICY_VERSION
+        candidate = Candidate(strategy, params)
+        signature = candidate_signature(candidate)
+        if signature in seen or signature in local_seen:
+            continue
+        local_seen.add(signature)
+        out.append(candidate)
+    return out
+
+
 def choose_batch(
     results: List[dict],
     seen: set[str],
@@ -698,6 +741,24 @@ def choose_batch(
     focus_timeframes = {
         int(x) for x in (focus.get("timeframes") or []) if int(x) in {1, 5}
     }
+
+    # First harvest context evidence from the strategy data we already paid to
+    # discover. Rejected rows are intentionally included: aggregate failure
+    # does not imply failure in every market condition.
+    context_backfill = _context_backfill_candidates(results, seen)
+    if context_backfill:
+        context_backfill.sort(
+            key=lambda candidate: _candidate_priority(
+                candidate, focus_families, focus_timeframes
+            ),
+            reverse=True,
+        )
+        return _round_robin_candidates(
+            context_backfill,
+            batch_size=batch_size,
+            focus_families=focus_families,
+            focus_timeframes=focus_timeframes,
+        )
 
     pending_discovery = [
         candidate for candidate in discovery_candidates()
