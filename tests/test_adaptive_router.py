@@ -3,6 +3,7 @@ import unittest
 from adaptive_router import (
     adaptive_signal,
     build_adaptive_policy,
+    execution_policy,
     market_context,
 )
 
@@ -116,6 +117,41 @@ class AdaptiveRouterTests(unittest.TestCase):
         policy = build_adaptive_policy(results, min_context_trades=4)
         self.assertEqual(policy["routes"], {})
         self.assertTrue(policy["final_holdout_excluded"])
+
+    def test_execution_policy_ignores_non_actionable_evidence_scores(self):
+        base = {
+            "version": "adaptive-context-v1",
+            "routes": {
+                "trend|London": [{
+                    "entry_model": "momentum",
+                    "entry_params": {"fast": 3, "slow": 12, "entry_bps": 4.0},
+                    "source_strategy": "momentum",
+                    "evidence_score": 10.0,
+                    "source_trades": 20,
+                    "source_expectancy_bps": 3.0,
+                }]
+            },
+            "exit_profiles": {
+                "trend|London": {
+                    "name": "trend_atr_2_5r",
+                    "stop_atr": 1.0,
+                    "target_r": 2.5,
+                    "max_hold": 32,
+                }
+            },
+        }
+        changed_evidence = {
+            **base,
+            "routes": {
+                "trend|London": [{
+                    **base["routes"]["trend|London"][0],
+                    "evidence_score": 99.0,
+                    "source_trades": 200,
+                    "source_expectancy_bps": 9.0,
+                }]
+            },
+        }
+        self.assertEqual(execution_policy(base), execution_policy(changed_evidence))
 
     def test_adaptive_signal_uses_policy_for_current_context(self):
         bars = _bars()
