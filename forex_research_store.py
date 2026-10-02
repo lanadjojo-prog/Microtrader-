@@ -43,7 +43,8 @@ class ForexResearchStore:
                 ADD COLUMN IF NOT EXISTS funnel_score DOUBLE PRECISION,
                 ADD COLUMN IF NOT EXISTS entry_model_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS regime_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
-                ADD COLUMN IF NOT EXISTS ensemble_policy JSONB NOT NULL DEFAULT '{}'::jsonb
+                ADD COLUMN IF NOT EXISTS ensemble_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS adaptive_diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_forex_research_strategy_state (
@@ -73,14 +74,14 @@ class ForexResearchStore:
                     positive_symbols, symbol_count, per_symbol,
                     family, funnel_stage, funnel_score,
                     entry_model_breakdown, regime_breakdown, ensemble_policy,
-                    tested_at
+                    adaptive_diagnostics, tested_at
                 ) VALUES (
                     %s, %s, %s::jsonb, %s, %s::jsonb,
                     %s::jsonb, %s::jsonb, %s::jsonb, %s,
                     %s, %s, %s::jsonb,
                     %s, %s, %s,
                     %s::jsonb, %s::jsonb, %s::jsonb,
-                    NOW()
+                    %s::jsonb, NOW()
                 )
                 ON CONFLICT (signature) DO UPDATE SET
                     promoted = EXCLUDED.promoted,
@@ -98,6 +99,7 @@ class ForexResearchStore:
                     entry_model_breakdown = EXCLUDED.entry_model_breakdown,
                     regime_breakdown = EXCLUDED.regime_breakdown,
                     ensemble_policy = EXCLUDED.ensemble_policy,
+                    adaptive_diagnostics = EXCLUDED.adaptive_diagnostics,
                     tested_at = NOW()
                 """,
                 (
@@ -119,6 +121,7 @@ class ForexResearchStore:
                     json.dumps(result.get("entry_model_breakdown", {})),
                     json.dumps(result.get("regime_breakdown", {})),
                     json.dumps(result.get("ensemble_policy", {})),
+                    json.dumps(result.get("adaptive_diagnostics", {})),
                 ),
             )
             await conn.commit()
@@ -147,14 +150,14 @@ class ForexResearchStore:
                     positive_symbols, symbol_count, per_symbol,
                     family, funnel_stage, funnel_score,
                     entry_model_breakdown, regime_breakdown, ensemble_policy,
-                    tested_at
+                    adaptive_diagnostics, tested_at
                 ) VALUES (
                     %s, %s, %s::jsonb, %s, %s::jsonb,
                     %s::jsonb, %s::jsonb, %s::jsonb, %s,
                     %s, %s, %s::jsonb,
                     %s, %s, %s,
                     %s::jsonb, %s::jsonb, %s::jsonb,
-                    NOW()
+                    %s::jsonb, NOW()
                 )
                 ON CONFLICT (signature) DO UPDATE SET
                     promoted = EXCLUDED.promoted,
@@ -172,6 +175,7 @@ class ForexResearchStore:
                     entry_model_breakdown = EXCLUDED.entry_model_breakdown,
                     regime_breakdown = EXCLUDED.regime_breakdown,
                     ensemble_policy = EXCLUDED.ensemble_policy,
+                    adaptive_diagnostics = EXCLUDED.adaptive_diagnostics,
                     tested_at = NOW()
                 """,
                 (
@@ -193,6 +197,7 @@ class ForexResearchStore:
                     json.dumps(result.get("entry_model_breakdown", {})),
                     json.dumps(result.get("regime_breakdown", {})),
                     json.dumps(result.get("ensemble_policy", {})),
+                    json.dumps(result.get("adaptive_diagnostics", {})),
                 ),
             )
             conn.execute(
@@ -231,14 +236,14 @@ class ForexResearchStore:
                     positive_symbols, symbol_count, per_symbol,
                     family, funnel_stage, funnel_score,
                     entry_model_breakdown, regime_breakdown, ensemble_policy,
-                    tested_at
+                    adaptive_diagnostics, tested_at
                 ) VALUES (
                     %s, %s, %s::jsonb, %s, %s::jsonb,
                     %s::jsonb, %s::jsonb, %s::jsonb, %s,
                     %s, %s, %s::jsonb,
                     %s, %s, %s,
                     %s::jsonb, %s::jsonb, %s::jsonb,
-                    NOW()
+                    %s::jsonb, NOW()
                 )
                 ON CONFLICT (signature) DO UPDATE SET
                     promoted = EXCLUDED.promoted,
@@ -256,6 +261,7 @@ class ForexResearchStore:
                     entry_model_breakdown = EXCLUDED.entry_model_breakdown,
                     regime_breakdown = EXCLUDED.regime_breakdown,
                     ensemble_policy = EXCLUDED.ensemble_policy,
+                    adaptive_diagnostics = EXCLUDED.adaptive_diagnostics,
                     tested_at = NOW()
                 """,
                 (
@@ -277,6 +283,7 @@ class ForexResearchStore:
                     json.dumps(result.get("entry_model_breakdown", {})),
                     json.dumps(result.get("regime_breakdown", {})),
                     json.dumps(result.get("ensemble_policy", {})),
+                    json.dumps(result.get("adaptive_diagnostics", {})),
                 ),
             )
             await conn.execute(
@@ -324,7 +331,7 @@ class ForexResearchStore:
                        positive_symbols, symbol_count, per_symbol,
                        family, funnel_stage, funnel_score,
                        entry_model_breakdown, regime_breakdown, ensemble_policy,
-                       tested_at
+                       adaptive_diagnostics, tested_at
                 FROM microtrader_forex_research_strategy_results
                 ORDER BY promoted DESC,
                          funnel_score DESC NULLS LAST,
@@ -362,7 +369,7 @@ class ForexResearchStore:
                            positive_symbols, symbol_count, per_symbol,
                            family, funnel_stage, funnel_score,
                        entry_model_breakdown, regime_breakdown, ensemble_policy,
-                       tested_at,
+                       adaptive_diagnostics, tested_at,
                            ROW_NUMBER() OVER (
                                PARTITION BY COALESCE(family, strategy),
                                             COALESCE(funnel_stage, 'rejected')
@@ -378,7 +385,7 @@ class ForexResearchStore:
                        positive_symbols, symbol_count, per_symbol,
                        family, funnel_stage, funnel_score,
                        entry_model_breakdown, regime_breakdown, ensemble_policy,
-                       tested_at
+                       adaptive_diagnostics, tested_at
                 FROM ranked
                 WHERE promoted = TRUE OR family_stage_rank <= %s
                 ORDER BY promoted DESC,

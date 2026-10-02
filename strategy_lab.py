@@ -11,6 +11,12 @@ from ctrader_client import CTraderClient
 from config import Settings
 from forex_research_store import ForexResearchStore
 from market_filters import entry_allowed
+from adaptive_router import (
+    ADAPTIVE_CONTEXT_VERSION,
+    adaptive_signal,
+    context_key,
+    market_context,
+)
 
 log = logging.getLogger("microtrader.strategy_lab")
 
@@ -68,7 +74,12 @@ class StrategyLab:
         self._task: Optional[asyncio.Task] = None
         self._results: List[dict] = []
         self._summary: dict = {}
-        self._agent_focus: dict = {"families": [], "timeframes": [], "reason": ""}
+        self._agent_focus: dict = {
+            "families": [],
+            "timeframes": [],
+            "reason": "",
+            "adaptive_policy": {},
+        }
         self.store = ForexResearchStore(settings.database_url)
         self._persist_queue: asyncio.Queue = asyncio.Queue()
         self._persist_task: Optional[asyncio.Task] = None
@@ -97,16 +108,24 @@ class StrategyLab:
         payload["min_volume_ratio"] = self.settings.strategy_min_volume_ratio
         payload["max_loss_streak"] = self.settings.strategy_max_loss_streak
         payload["max_loss_streak_asymmetric"] = self.settings.strategy_max_loss_streak_asymmetric
+        payload["adaptive_context_version"] = ADAPTIVE_CONTEXT_VERSION
         return payload
 
     def results(self) -> List[dict]:
         return list(self._results)
 
-    def set_agent_focus(self, families: List[str], timeframes: List[int], reason: str = "") -> None:
+    def set_agent_focus(
+        self,
+        families: List[str],
+        timeframes: List[int],
+        reason: str = "",
+        adaptive_policy: Optional[dict] = None,
+    ) -> None:
         self._agent_focus = {
             "families": [str(x) for x in families][:6],
             "timeframes": [int(x) for x in timeframes if int(x) in {1, 5}][:2],
             "reason": str(reason)[:500],
+            "adaptive_policy": dict(adaptive_policy or {}),
         }
 
     def agent_focus(self) -> dict:
@@ -495,7 +514,8 @@ def candidate_signature(candidate: Candidate) -> str:
     return (
         candidate.strategy + ":" +
         json.dumps(candidate.params, sort_keys=True, separators=(",", ":")) +
-        ":" + RESEARCH_POLICY_VERSION
+        ":" + RESEARCH_POLICY_VERSION +
+        ":" + ADAPTIVE_CONTEXT_VERSION
     )
 
 
@@ -518,6 +538,15 @@ def discovery_candidates() -> List[Candidate]:
                 "breakout_window": 20, "buffer_bps": 2.0,
                 "vwap_window": 60, "z_entry": 1.4,
                 "stop_atr": 1.0, "target_r": 2.0, "max_hold": 24,
+            }),
+            Candidate("adaptive_router", {
+                **common,
+                "regime_atr_short": 14, "regime_atr_long": 50,
+                "regime_vol_ratio": 1.20, "regime_trend_atr": 0.55,
+                "fast": 8, "slow": 30, "vwap_window": 60,
+                "adaptive_exit_target_scale": 1.0,
+                "adaptive_exit_stop_scale": 1.0,
+                "adaptive_exit_hold_scale": 1.0,
             }),
             Candidate("vwap_reversion", {**common, "window": 60, "z_entry": 1.5, "max_hold": 20}),
             Candidate("vwap_momentum", {**common, "window": 60, "buffer_bps": 8.0, "max_hold": 20}),
@@ -585,6 +614,21 @@ def parameter_variants(row: dict, phase: str, generation: int = 1) -> List[Candi
                 q["_phase"] = phase
                 out.append(Candidate(strategy, q))
 
+    if strategy == "adaptive_router":
+        for key in (
+            "regime_vol_ratio", "regime_trend_atr",
+            "adaptive_exit_target_scale", "adaptive_exit_stop_scale",
+            "adaptive_exit_hold_scale",
+        ):
+            if key not in base:
+                continue
+            for offset in local_offsets:
+                q = dict(base)
+                v = float(base[key])
+                q[key] = round(max(0.05, v * (1.0 + offset)), 4)
+                q["_phase"] = phase
+                out.append(Candidate(strategy, q))
+
     if strategy == "asymmetric_breakout":
         # Explore asymmetric payoffs densely around the current target as well
         # as a few canonical R multiples.
@@ -642,6 +686,51 @@ def _round_robin_candidates(
     return out
 
 
+def _context_backfill_candidates(
+    results: List[dict],
+    seen: set[str],
+) -> List[Candidate]:
+    """Re-run historical configurations to recover context-level evidence.
+
+    Old aggregate rows do not contain the per-trade context needed by the new
+    router. Re-evaluate the same trading parameters on the pre-holdout
+    discovery slice, including historically rejected configurations: a model
+    that is weak globally may still be a useful specialist in one regime.
+    """
+    rows = sorted(
+        results,
+        key=lambda row: (
+            float(row.get("funnel_score") or 0.0),
+            float((row.get("oos") or {}).get("trades") or 0.0),
+        ),
+        reverse=True,
+    )
+    out: List[Candidate] = []
+    local_seen: set[str] = set()
+    for row in rows:
+        strategy = str(row.get("strategy") or "")
+        if not strategy or strategy == "adaptive_router":
+            continue
+        diagnostics = dict(row.get("adaptive_diagnostics") or {})
+        if diagnostics.get("context_entry_breakdown"):
+            continue
+        params = dict(row.get("params") or {})
+        if not params:
+            continue
+        if str(params.get("_policy_version") or "") != RESEARCH_POLICY_VERSION:
+            continue
+        # Context backfill deliberately stays on pre-holdout discovery data.
+        params["_phase"] = "discovery"
+        params["_policy_version"] = RESEARCH_POLICY_VERSION
+        candidate = Candidate(strategy, params)
+        signature = candidate_signature(candidate)
+        if signature in seen or signature in local_seen:
+            continue
+        local_seen.add(signature)
+        out.append(candidate)
+    return out
+
+
 def choose_batch(
     results: List[dict],
     seen: set[str],
@@ -654,6 +743,24 @@ def choose_batch(
     focus_timeframes = {
         int(x) for x in (focus.get("timeframes") or []) if int(x) in {1, 5}
     }
+
+    # First harvest context evidence from the strategy data we already paid to
+    # discover. Rejected rows are intentionally included: aggregate failure
+    # does not imply failure in every market condition.
+    context_backfill = _context_backfill_candidates(results, seen)
+    if context_backfill:
+        context_backfill.sort(
+            key=lambda candidate: _candidate_priority(
+                candidate, focus_families, focus_timeframes
+            ),
+            reverse=True,
+        )
+        return _round_robin_candidates(
+            context_backfill,
+            batch_size=batch_size,
+            focus_families=focus_families,
+            focus_timeframes=focus_timeframes,
+        )
 
     pending_discovery = [
         candidate for candidate in discovery_candidates()
@@ -672,6 +779,43 @@ def choose_batch(
             focus_families=focus_families,
             focus_timeframes=focus_timeframes,
         )
+
+    # Once the research agent has enough context-labelled evidence, inject one
+    # data-driven adaptive-router candidate per active timeframe. The complete
+    # specialist policy is part of the signature, so unchanged policy is never
+    # re-tested merely because a new generation started.
+    adaptive_policy = dict(focus.get("adaptive_policy") or {})
+    if adaptive_policy.get("routes"):
+        adaptive_candidates: List[Candidate] = []
+        adaptive_tfs = sorted(focus_timeframes or {1, 5})
+        for tf in adaptive_tfs:
+            params = {
+                "timeframe_min": int(tf),
+                "_phase": "discovery",
+                "_policy_version": RESEARCH_POLICY_VERSION,
+                "market": "forex",
+                "data_source": "ctrader",
+                "direction_mode": "long_short",
+                "entry_sessions": "london_new_york",
+                "min_volume_ratio": 0.70,
+                "volume_window": 50,
+                "regime_atr_short": 14,
+                "regime_atr_long": 50,
+                "regime_vol_ratio": 1.20,
+                "regime_trend_atr": 0.55,
+                "fast": 8,
+                "slow": 30,
+                "vwap_window": 60,
+                "adaptive_exit_target_scale": 1.0,
+                "adaptive_exit_stop_scale": 1.0,
+                "adaptive_exit_hold_scale": 1.0,
+                "adaptive_policy": adaptive_policy,
+            }
+            candidate = Candidate("adaptive_router", params)
+            if candidate_signature(candidate) not in seen:
+                adaptive_candidates.append(candidate)
+        if adaptive_candidates:
+            return adaptive_candidates[:batch_size]
 
     # A configuration that passed Incubator is frozen before Deep Search.
     # Deep Search never mutates parameters: it is the final holdout test.
@@ -778,6 +922,16 @@ def choose_batch(
                 "vwap_window": 30 + 5*wave + 2*epoch,
                 "z_entry": round(0.9 + 0.12*wave + 0.02*epoch, 2),
                 "stop_atr": 1.0, "target_r": 2.0, "max_hold": 24}),
+            Candidate("adaptive_router", {"timeframe_min": tf, "_phase": "discovery",
+                "regime_atr_short": 8 + wave,
+                "regime_atr_long": 40 + 5*wave + 2*epoch,
+                "regime_vol_ratio": round(1.05 + 0.05*wave + 0.01*epoch, 2),
+                "regime_trend_atr": round(0.25 + 0.07*wave + 0.01*epoch, 2),
+                "fast": 4 + wave, "slow": 20 + 4*wave + 2*epoch,
+                "vwap_window": 30 + 5*wave + 2*epoch,
+                "adaptive_exit_target_scale": round(0.8 + 0.08*wave, 2),
+                "adaptive_exit_stop_scale": round(0.85 + 0.05*wave, 2),
+                "adaptive_exit_hold_scale": round(0.75 + 0.08*wave, 2)}),
             Candidate("vwap_reversion", {"timeframe_min": tf, "_phase": "discovery",
                 "window": 30 + 5*wave + 2*epoch, "z_entry": round(0.9 + 0.12*wave + 0.02*epoch, 2),
                 "max_hold": 10 + 3*wave + epoch}),
@@ -883,6 +1037,44 @@ def aggregate_bars(bars: List[dict], minutes: int) -> List[dict]:
         })
     return out
 
+def _candidate_exit_model(candidate: Candidate) -> str:
+    p = candidate.params
+    if candidate.strategy in {"regime_ensemble", "asymmetric_breakout"}:
+        return (
+            f"atr_rr_stop{float(p.get('stop_atr', 1.0)):.2f}_"
+            f"target{float(p.get('target_r', 2.0)):.2f}_hold{int(p.get('max_hold', 24))}"
+        )
+    if candidate.strategy == "momentum":
+        return f"momentum_flip_hold{int(p.get('max_hold', 16))}"
+    if candidate.strategy == "mean_reversion":
+        return (
+            f"mean_reversion_z{float(p.get('z_exit', 0.25)):.2f}_"
+            f"hold{int(p.get('max_hold', 20))}"
+        )
+    return f"time_exit_hold{int(p.get('max_hold', 24))}"
+
+
+def _annotate_trade_context(
+    candidate: Candidate,
+    trades: List[dict],
+    bars: List[dict],
+) -> None:
+    if not trades or not bars:
+        return
+    by_time = {str(row.get("t") or ""): idx for idx, row in enumerate(bars)}
+    default_exit = _candidate_exit_model(candidate)
+    for trade in trades:
+        idx = by_time.get(str(trade.get("entry_time") or ""))
+        if idx is None:
+            continue
+        context = dict(trade.get("entry_context") or market_context(bars, idx, candidate.params))
+        trade.setdefault("entry_model", candidate.strategy)
+        trade.setdefault("entry_regime", str(context.get("regime") or "unknown"))
+        trade["entry_context"] = context
+        trade.setdefault("context_key", context_key(context))
+        trade.setdefault("exit_model", default_exit)
+
+
 def evaluate_candidate(
     candidate: Candidate,
     bars_by_symbol: Dict[str, List[dict]],
@@ -925,6 +1117,9 @@ def evaluate_candidate(
         symbol_train = simulate(candidate, symbol, train, cost_bps)
         symbol_oos = simulate(candidate, symbol, test, cost_bps)
         symbol_stress = simulate(candidate, symbol, test, cost_bps * stress_cost_multiplier)
+        _annotate_trade_context(candidate, symbol_train, train)
+        _annotate_trade_context(candidate, symbol_oos, test)
+        _annotate_trade_context(candidate, symbol_stress, test)
         train_trades.extend(symbol_train)
         oos_trades.extend(symbol_oos)
         stress_oos_trades.extend(symbol_stress)
@@ -944,19 +1139,33 @@ def evaluate_candidate(
             groups.setdefault(label, []).append(trade)
         return {label: metrics(group) for label, group in groups.items()}
 
-    entry_model_breakdown = (
-        _breakdown(oos_trades, "entry_model")
-        if candidate.strategy == "regime_ensemble" else {}
+    def _combo_breakdown(rows: List[dict], a: str, b: str) -> Dict[str, dict]:
+        groups: Dict[str, List[dict]] = {}
+        for trade in rows:
+            left = str(trade.get(a) or "unknown")
+            right = str(trade.get(b) or "unknown")
+            groups.setdefault(f"{left}||{right}", []).append(trade)
+        return {label: metrics(group) for label, group in groups.items()}
+
+    entry_model_breakdown = _breakdown(oos_trades, "entry_model")
+    regime_breakdown = _breakdown(oos_trades, "entry_regime")
+    context_breakdown = _breakdown(oos_trades, "context_key")
+    exit_model_breakdown = _breakdown(oos_trades, "exit_model")
+    context_entry_breakdown = _combo_breakdown(oos_trades, "context_key", "entry_model")
+    context_exit_breakdown = _combo_breakdown(oos_trades, "context_key", "exit_model")
+    stress_context_breakdown = _breakdown(stress_oos_trades, "context_key")
+    stress_context_entry_breakdown = _combo_breakdown(
+        stress_oos_trades, "context_key", "entry_model"
     )
-    regime_breakdown = (
-        _breakdown(oos_trades, "entry_regime")
-        if candidate.strategy == "regime_ensemble" else {}
+    stress_context_exit_breakdown = _combo_breakdown(
+        stress_oos_trades, "context_key", "exit_model"
     )
+
     ensemble_pass = True
     ensemble_positive_models: List[str] = []
     ensemble_active_models: List[str] = []
     ensemble_dominant_share = 0.0
-    if candidate.strategy == "regime_ensemble":
+    if candidate.strategy in {"regime_ensemble", "adaptive_router"}:
         total_model_trades = max(1, int(oos_metrics.get("trades") or 0))
         min_component_trades = 3
         ensemble_active_models = [
@@ -978,6 +1187,24 @@ def evaluate_candidate(
             and len(ensemble_positive_models) >= 2
             and ensemble_dominant_share <= 0.90
         )
+
+    router_active_contexts = [
+        name for name, row in context_breakdown.items()
+        if name.split("|", 1)[0] in {"expansion", "trend", "range"}
+        and int(row.get("trades") or 0) >= 3
+    ]
+    router_positive_contexts = [
+        name for name in router_active_contexts
+        if float(context_breakdown[name].get("expectancy_bps") or 0.0) > 0
+    ]
+    router_pass = (
+        candidate.strategy != "adaptive_router"
+        or (
+            ensemble_pass
+            and len(router_active_contexts) >= 2
+            and len(router_positive_contexts) >= 2
+        )
+    )
 
     positive_symbols = sum(
         1 for row in per_symbol.values()
@@ -1025,11 +1252,17 @@ def evaluate_candidate(
         reasons.append(
             f"final holdout has fewer than {MIN_DEEP_OOS_DAYS} trading days"
         )
-    if candidate.strategy == "regime_ensemble" and not ensemble_pass:
+    if candidate.strategy in {"regime_ensemble", "adaptive_router"} and not ensemble_pass:
         reasons.append(
-            "regime ensemble lacks robust multi-entry contribution "
+            f"{candidate.strategy} lacks robust multi-entry contribution "
             f"(active={len(ensemble_active_models)}, positive={len(ensemble_positive_models)}, "
             f"dominant_share={ensemble_dominant_share:.0%})"
+        )
+    if candidate.strategy == "adaptive_router" and not router_pass:
+        reasons.append(
+            "adaptive router lacks positive evidence across at least two market contexts "
+            f"(active_contexts={len(router_active_contexts)}, "
+            f"positive_contexts={len(router_positive_contexts)})"
         )
 
     raw_pass = not reasons
@@ -1045,6 +1278,7 @@ def evaluate_candidate(
         hard_frequency_pass
         and streak_pass
         and ensemble_pass
+        and router_pass
         and oos_metrics["trades"] >= 15
         and (
             oos_metrics["expectancy_bps"] > 0
@@ -1056,6 +1290,7 @@ def evaluate_candidate(
         hard_frequency_pass
         and streak_pass
         and ensemble_pass
+        and router_pass
         and oos_metrics["trades"] >= max(20, min_oos_trades // 2)
         and oos_metrics["expectancy_bps"] > 0
         and oos_metrics["profit_factor"] >= 1.20
@@ -1113,11 +1348,30 @@ def evaluate_candidate(
         "entry_model_breakdown": entry_model_breakdown,
         "regime_breakdown": regime_breakdown,
         "ensemble_policy": {
-            "applies": candidate.strategy == "regime_ensemble",
+            "applies": candidate.strategy in {"regime_ensemble", "adaptive_router"},
             "passed": ensemble_pass,
             "active_models": ensemble_active_models,
             "positive_models": ensemble_positive_models,
             "dominant_trade_share": round(ensemble_dominant_share, 3),
+        },
+        "adaptive_diagnostics": {
+            "context_version": ADAPTIVE_CONTEXT_VERSION,
+            "context_breakdown": context_breakdown,
+            "entry_model_breakdown": entry_model_breakdown,
+            "exit_model_breakdown": exit_model_breakdown,
+            "context_entry_breakdown": context_entry_breakdown,
+            "context_exit_breakdown": context_exit_breakdown,
+            "stress_context_breakdown": stress_context_breakdown,
+            "stress_context_entry_breakdown": stress_context_entry_breakdown,
+            "stress_context_exit_breakdown": stress_context_exit_breakdown,
+            "router_passed": router_pass,
+            "active_contexts": router_active_contexts,
+            "positive_contexts": router_positive_contexts,
+            "exit_profiles": {
+                str(t.get("exit_model")): dict(t.get("exit_profile") or {})
+                for t in oos_trades
+                if t.get("exit_model") and t.get("exit_profile")
+            },
         },
     }
 
@@ -1166,6 +1420,8 @@ def simulate(
         return _simulate_trend_pullback(candidate, symbol, bars, cost_bps)
     if candidate.strategy == "regime_ensemble":
         return _simulate_regime_ensemble(candidate, symbol, bars, cost_bps)
+    if candidate.strategy == "adaptive_router":
+        return _simulate_adaptive_router(candidate, symbol, bars, cost_bps)
     if candidate.strategy == "vwap_reversion":
         return _simulate_vwap_reversion(candidate, symbol, bars, cost_bps)
     if candidate.strategy == "vwap_momentum":
@@ -1483,6 +1739,88 @@ def _simulate_regime_ensemble(
         trade["entry_model"] = entry_model
         trade["entry_regime"] = regime
         trade["exit_reason"] = exit_reason
+        trades.append(trade)
+        i = x + 1
+    return trades
+
+
+def _simulate_adaptive_router(
+    candidate: Candidate,
+    symbol: str,
+    bars: List[dict],
+    cost_bps: float,
+) -> List[dict]:
+    """Context-aware multi-entry router with independently selected RR exits."""
+    p = candidate.params
+    warmup = max(
+        int(p.get("regime_atr_long", 50)) + 1,
+        int(p.get("slow", 30)),
+        int(p.get("vwap_window", 60)),
+        61,
+    )
+    trades: List[dict] = []
+    i = warmup
+    while i < len(bars) - 2:
+        if not _entry_ok(p, bars, i):
+            i += 1
+            continue
+        direction, entry_model, context, exit_profile, route_meta = adaptive_signal(
+            p, bars, i
+        )
+        if not direction:
+            i += 1
+            continue
+
+        entry = float(bars[i]["o"])
+        atr = _atr(bars, i, 14)
+        stop_atr = max(0.10, float(exit_profile.get("stop_atr", 1.0)))
+        risk = atr * stop_atr
+        if risk <= 0:
+            i += 1
+            continue
+        target_r = max(0.25, float(exit_profile.get("target_r", 2.0)))
+        max_hold = max(2, int(exit_profile.get("max_hold", 24)))
+        stop = entry - risk if direction > 0 else entry + risk
+        target = entry + risk * target_r if direction > 0 else entry - risk * target_r
+
+        e = i
+        x = min(e + max_hold, len(bars) - 1)
+        exit_price = float(bars[x]["o"])
+        r_mult = None
+        exit_reason = "max_hold"
+        for j in range(e, x + 1):
+            lo = float(bars[j]["l"])
+            hi = float(bars[j]["h"])
+            stop_hit = (lo <= stop) if direction > 0 else (hi >= stop)
+            target_hit = (hi >= target) if direction > 0 else (lo <= target)
+            if stop_hit:
+                exit_price = stop
+                x = j
+                r_mult = -1.0
+                exit_reason = "stop"
+                break
+            if target_hit:
+                exit_price = target
+                x = j
+                r_mult = target_r
+                exit_reason = "target"
+                break
+        if r_mult is None:
+            r_mult = direction * (exit_price - entry) / risk if risk > 0 else 0.0
+
+        trade = _trade(
+            symbol, bars[e], bars[x], entry, exit_price, cost_bps,
+            r_mult, direction=direction,
+        )
+        trade["entry_model"] = entry_model
+        trade["entry_regime"] = str(context.get("regime") or "unknown")
+        trade["entry_context"] = context
+        trade["context_key"] = context_key(context)
+        trade["exit_model"] = str(exit_profile.get("name") or "adaptive_rr")
+        trade["exit_profile"] = dict(exit_profile)
+        trade["exit_reason"] = exit_reason
+        trade["route_evidence_score"] = float(route_meta.get("evidence_score") or 0.0)
+        trade["route_source_strategy"] = str(route_meta.get("source_strategy") or entry_model)
         trades.append(trade)
         i = x + 1
     return trades

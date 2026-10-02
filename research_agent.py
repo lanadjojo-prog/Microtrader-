@@ -13,6 +13,7 @@ import psycopg
 
 from config import Settings
 from strategy_lab import StrategyLab
+from adaptive_router import ADAPTIVE_CONTEXT_VERSION, build_adaptive_policy
 
 log = logging.getLogger("microtrader.research_agent")
 
@@ -112,7 +113,7 @@ class ResearchAgent:
                 "focus_families": [],
                 "focus_timeframes": [],
             }
-            self.lab.set_agent_focus([], [], decision["reason"])
+            self.lab.set_agent_focus([], [], decision["reason"], adaptive_policy={})
             self._commit_decision(decision, [])
             log.info("Research Agent cycle=%s waiting for discovery results", self.state.cycles)
             return
@@ -184,6 +185,27 @@ class ResearchAgent:
         focus_families = [x["family"] for x in focus]
         focus_timeframes = [int(x["timeframe"]) for x in tf_summary[:2] if int(x["timeframe"]) in (1, 5)] or [1, 5]
         hypotheses = self._make_hypotheses(focus, tf_summary, results)
+        adaptive_policy = build_adaptive_policy(
+            results,
+            min_context_trades=4,
+            max_entries_per_context=3,
+        )
+        adaptive_routes = dict(adaptive_policy.get("routes") or {})
+        if adaptive_routes:
+            hypotheses.insert(0, {
+                "family": "adaptive_router",
+                "timeframe_min": None,
+                "funnel_score": None,
+                "expectancy_bps": None,
+                "profit_factor": None,
+                "win_rate_pct": None,
+                "payoff_ratio": None,
+                "thesis": (
+                    f"Adaptive router has {len(adaptive_routes)} market-context routes "
+                    f"and {int(adaptive_policy.get('specialists') or 0)} validated entry specialists; "
+                    "test entry selection and exit profiles independently OOS."
+                ),
+            })
 
         decision = {
             "action": "steer_strategy_funnel",
@@ -193,9 +215,22 @@ class ResearchAgent:
             "focus_timeframes": focus_timeframes,
             "family_summary": family_summary[:10],
             "timeframe_summary": tf_summary,
+            "adaptive_context_version": ADAPTIVE_CONTEXT_VERSION,
+            "adaptive_policy": adaptive_policy,
+            "adaptive_policy_summary": {
+                "contexts": int(adaptive_policy.get("contexts") or 0),
+                "specialists": int(adaptive_policy.get("specialists") or 0),
+                "evidence_rows": int(adaptive_policy.get("evidence_rows") or 0),
+                "route_keys": sorted(adaptive_routes.keys()),
+            },
         }
 
-        self.lab.set_agent_focus(focus_families, focus_timeframes, reason)
+        self.lab.set_agent_focus(
+            focus_families,
+            focus_timeframes,
+            reason,
+            adaptive_policy=adaptive_policy,
+        )
         self._commit_decision(decision, hypotheses)
         log.info(
             "Research Agent cycle=%s mode=%s focus_families=%s focus_timeframes=%s hypotheses=%s",
@@ -307,5 +342,6 @@ class ResearchAgent:
             "can_place_orders": False,
             "can_enable_live_trading": False,
         }
+        payload["adaptive_context_version"] = ADAPTIVE_CONTEXT_VERSION
         payload["strategy_lab_focus"] = self.lab.agent_focus()
         return payload
