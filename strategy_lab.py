@@ -784,11 +784,15 @@ def choose_batch(
     # data-driven adaptive-router candidate per active timeframe. The complete
     # specialist policy is part of the signature, so unchanged policy is never
     # re-tested merely because a new generation started.
-    adaptive_policy = dict(focus.get("adaptive_policy") or {})
-    if adaptive_policy.get("routes"):
+    adaptive_policy_bundle = dict(focus.get("adaptive_policy") or {})
+    timeframe_policies = dict(adaptive_policy_bundle.get("timeframes") or {})
+    if timeframe_policies:
         adaptive_candidates: List[Candidate] = []
         adaptive_tfs = sorted(focus_timeframes or {1, 5})
         for tf in adaptive_tfs:
+            adaptive_policy = dict(timeframe_policies.get(str(tf)) or {})
+            if not adaptive_policy.get("routes"):
+                continue
             params = {
                 "timeframe_min": int(tf),
                 "_phase": "discovery",
