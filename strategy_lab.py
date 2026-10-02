@@ -15,6 +15,7 @@ from adaptive_router import (
     ADAPTIVE_CONTEXT_VERSION,
     adaptive_signal,
     context_key,
+    execution_policy,
     market_context,
 )
 
@@ -744,11 +745,17 @@ def choose_batch(
         int(x) for x in (focus.get("timeframes") or []) if int(x) in {1, 5}
     }
 
-    # First harvest context evidence from the strategy data we already paid to
-    # discover. Rejected rows are intentionally included: aggregate failure
-    # does not imply failure in every market condition.
+    adaptive_policy_bundle = dict(focus.get("adaptive_policy") or {})
+    timeframe_policies = dict(adaptive_policy_bundle.get("timeframes") or {})
+
+    # Harvest context evidence from historical strategies without monopolizing
+    # the lab. Before an adaptive policy exists, alternate backfill with normal
+    # research. Once specialists exist, spend roughly one generation in three
+    # on backfill so the router can keep improving while adaptive candidates
+    # are already being tested.
     context_backfill = _context_backfill_candidates(results, seen)
-    if context_backfill:
+    backfill_every = 3 if timeframe_policies else 2
+    if context_backfill and generation % backfill_every == 0:
         context_backfill.sort(
             key=lambda candidate: _candidate_priority(
                 candidate, focus_families, focus_timeframes
@@ -784,15 +791,14 @@ def choose_batch(
     # data-driven adaptive-router candidate per active timeframe. The complete
     # specialist policy is part of the signature, so unchanged policy is never
     # re-tested merely because a new generation started.
-    adaptive_policy_bundle = dict(focus.get("adaptive_policy") or {})
-    timeframe_policies = dict(adaptive_policy_bundle.get("timeframes") or {})
     if timeframe_policies:
         adaptive_candidates: List[Candidate] = []
         adaptive_tfs = sorted(focus_timeframes or {1, 5})
         for tf in adaptive_tfs:
-            adaptive_policy = dict(timeframe_policies.get(str(tf)) or {})
-            if not adaptive_policy.get("routes"):
+            learned_policy = dict(timeframe_policies.get(str(tf)) or {})
+            if not learned_policy.get("routes"):
                 continue
+            adaptive_policy = execution_policy(learned_policy)
             params = {
                 "timeframe_min": int(tf),
                 "_phase": "discovery",
