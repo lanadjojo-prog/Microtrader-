@@ -454,12 +454,7 @@ class PaperTradingEngine:
     tracked from EUR 50 using subsequent cTrader market bars only.
     """
 
-    SUPPORTED = {
-        "range_reversal", "trend_pullback", "asymmetric_breakout",
-        "momentum", "mean_reversion", "breakout", "extreme_reversal",
-        "volatility_breakout", "vwap_reversion", "vwap_momentum",
-        "regime_ensemble", "adaptive_router",
-    }
+    SUPPORTED = {"adaptive_router"}
 
     def __init__(self, settings: Settings, client: CTraderClient):
         self.settings = settings
@@ -493,7 +488,10 @@ class PaperTradingEngine:
             "hard >=3/day per strategy; preference 5-10/day; "
             "portfolio target >=10/day combined"
         )
-        payload["paper_sources"] = ["research_robust_validation_passed"]
+        payload["paper_sources"] = ["validated_adaptive_router_only"]
+        payload["paper_policy"] = (
+            "adaptive-only; complete validated context+entry+management+exit policy required"
+        )
         payload["adaptive_context_version"] = ADAPTIVE_CONTEXT_VERSION
         return payload
 
@@ -507,7 +505,7 @@ class PaperTradingEngine:
         self.state = PaperTradingState(
             running=True,
             stage="starting",
-            message="Starting promoted-strategy paper trading",
+            message="Starting adaptive-only paper trading",
         )
         self._task = asyncio.create_task(self._run(), name="microtrader-paper")
 
@@ -538,11 +536,11 @@ class PaperTradingEngine:
         portfolio_sources: set[str] = set()
         expected_portfolio_trades_per_day = 0.0
 
-        # Research candidates enter Paper only after the exact frozen
-        # configuration passes the single robust Validation gate.
+        # Paper is intentionally adaptive-only. Standalone research families
+        # remain useful as evidence/components, but never enter Paper directly.
         for row in research_validated:
             strategy = str(row.get("strategy") or "")
-            if strategy not in self.SUPPORTED:
+            if strategy != "adaptive_router":
                 continue
             params = {
                 k: v for k, v in dict(row.get("params") or {}).items()
@@ -551,8 +549,14 @@ class PaperTradingEngine:
             tf = int(params.get("timeframe_min") or 0)
             if tf not in (1, 5):
                 continue
-            params["_paper_source"] = "research"
-            params["_paper_exit_model"] = "research_native"
+            adaptive_policy = dict(params.get("adaptive_policy") or {})
+            if (
+                str(adaptive_policy.get("version") or "") != ADAPTIVE_CONTEXT_VERSION
+                or not dict(adaptive_policy.get("routes") or {})
+            ):
+                continue
+            params["_paper_source"] = "adaptive_validation"
+            params["_paper_exit_model"] = "adaptive_route"
             params["risk_eur"] = float(self.settings.paper_risk_eur)
             params.setdefault("stop_atr", 1.0)
             params["_research_max_loss_streak"] = int(
@@ -641,7 +645,7 @@ class PaperTradingEngine:
             >= float(self.settings.portfolio_min_trades_per_day)
         )
         log.info(
-            "Paper discovery: research_validated=%s active=%s "
+            "Paper discovery: adaptive_validated=%s active=%s "
             "combined_expected_tpd=%.2f hard_per_strategy=%.1f portfolio_target=%.1f",
             len(research_validated),
             len(active),
@@ -661,7 +665,7 @@ class PaperTradingEngine:
                     strategies = await self._discover()
                     if not strategies:
                         self.state.stage = "waiting_promoted"
-                        self.state.message = "No promoted strategies yet."
+                        self.state.message = "Waiting for a validated Adaptive Router."
                     else:
                         self.state.stage = (
                             "paper_trading"
@@ -669,7 +673,7 @@ class PaperTradingEngine:
                             else "building_portfolio"
                         )
                         self.state.message = (
-                            f"Paper trading {self.state.strategies} active promoted/validated "
+                            f"Paper trading {self.state.strategies} active validated adaptive "
                             f"strateg{'y' if self.state.strategies==1 else 'ies'} from €{self.settings.paper_start_balance:.0f}; "
                             f"strategy hard minimum {self.settings.strategy_min_trades_per_day:g}/day; "
                             f"combined portfolio target {self.state.expected_portfolio_trades_per_day:.1f}/"
