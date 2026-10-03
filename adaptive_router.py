@@ -444,10 +444,6 @@ def execution_policy(policy: dict) -> dict:
     return {
         "version": str(policy.get("version") or ADAPTIVE_CONTEXT_VERSION),
         "routes": routes,
-        "exit_profiles": {
-            str(key): dict(value or {})
-            for key, value in dict(policy.get("exit_profiles") or {}).items()
-        },
     }
 
 
