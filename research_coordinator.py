@@ -77,10 +77,19 @@ class ResearchCoordinator:
         self._task = None
 
     def _best_promising(self):
-        rows = [
-            r for r in self.lab.results()
-            if r.get("funnel_stage") == "promoted" and bool(r.get("promoted"))
-        ]
+        rows = []
+        for row in self.lab.results():
+            if row.get("funnel_stage") != "promoted" or not bool(row.get("promoted")):
+                continue
+            sig = candidate_signature(
+                Candidate(
+                    str(row.get("strategy") or ""),
+                    dict(row.get("params") or {}),
+                )
+            )
+            if sig in self._seen_validations:
+                continue
+            rows.append(row)
         if not rows:
             return None
         rows.sort(
@@ -195,7 +204,7 @@ class ResearchCoordinator:
                         await self._run_validation(row, sig)
                     else:
                         self.state.mode = "discovery"
-                        self.state.message = "Discovery active; strongest promising candidate already validated."
+                        self.state.message = "Discovery active; waiting for the next unvalidated promoted candidate."
                 else:
                     self.state.mode = "discovery"
                     self.state.message = "Discovery active; waiting for a candidate strong enough for validation."
