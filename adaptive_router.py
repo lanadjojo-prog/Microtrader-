@@ -342,28 +342,9 @@ def adaptive_signal(
                 "no_trade_reason": "no_proven_route",
             }
 
-    exit_profiles = dict(policy.get("exit_profiles") or {})
-    learned_exit = (
-        exit_profiles.get(key)
-        or exit_profiles.get(f"{context['regime']}|*")
-    )
-    if learned_exit:
-        exit_profile = dict(learned_exit)
-    elif research_defaults:
-        exit_profile = default_exit_profile(str(context["regime"]))
-    else:
-        return 0, "none", context, {}, {
-            "context_key": key,
-            "no_trade_reason": "no_proven_exit",
-        }
-
     target_scale = max(0.25, float(params.get("adaptive_exit_target_scale", 1.0)))
     hold_scale = max(0.25, float(params.get("adaptive_exit_hold_scale", 1.0)))
     stop_scale = max(0.25, float(params.get("adaptive_exit_stop_scale", 1.0)))
-    exit_profile["target_r"] = round(float(exit_profile.get("target_r", 2.0)) * target_scale, 4)
-    exit_profile["max_hold"] = max(2, int(round(float(exit_profile.get("max_hold", 24)) * hold_scale)))
-    exit_profile["stop_atr"] = round(float(exit_profile.get("stop_atr", 1.0)) * stop_scale, 4)
-    exit_profile.setdefault("name", f"{context['regime']}_adaptive_rr")
 
     for route in candidates:
         conditions = dict(route.get("conditions") or {})
@@ -379,6 +360,28 @@ def adaptive_signal(
         }
         direction = entry_signal(model, entry_params, bars, i)
         if direction:
+            exit_profile = dict(route.get("exit_profile") or {})
+            if not exit_profile:
+                if research_defaults:
+                    exit_profile = default_exit_profile(str(context["regime"]))
+                else:
+                    return 0, "none", context, {}, {
+                        "context_key": key,
+                        "no_trade_reason": "no_proven_exit",
+                    }
+            exit_profile["target_r"] = round(
+                float(exit_profile.get("target_r", 2.0)) * target_scale, 4
+            )
+            exit_profile["max_hold"] = max(
+                2,
+                int(round(float(exit_profile.get("max_hold", 24)) * hold_scale)),
+            )
+            exit_profile["stop_atr"] = round(
+                float(exit_profile.get("stop_atr", 1.0)) * stop_scale, 4
+            )
+            exit_profile.setdefault(
+                "name", f"{context['regime']}_adaptive_rr"
+            )
             meta = {
                 "context_key": key,
                 "evidence_score": round(float(route.get("evidence_score") or 0.0), 4),
@@ -391,7 +394,7 @@ def adaptive_signal(
             }
             return direction, model, context, exit_profile, meta
 
-    return 0, "none", context, exit_profile, {"context_key": key}
+    return 0, "none", context, {}, {"context_key": key}
 
 
 def _split_combo_key(raw: str) -> tuple[str, str]:
@@ -433,6 +436,7 @@ def execution_policy(policy: dict) -> dict:
                 "management_profile": dict(
                     row.get("management_profile") or {"name": "baseline"}
                 ),
+                "exit_profile": dict(row.get("exit_profile") or {}),
                 "conditions": dict(row.get("conditions") or {}),
             })
         if compact:
@@ -460,7 +464,7 @@ def build_adaptive_policy(
     policy from completed research rows.
     """
     entry_candidates: Dict[str, List[dict]] = {}
-    exit_candidates: Dict[str, List[dict]] = {}
+    exit_candidates: Dict[tuple[str, str], List[dict]] = {}
     management_candidates: Dict[tuple[str, str], List[dict]] = {}
     base_entry_metrics: Dict[tuple[str, str], dict] = {}
     evidence_rows = 0
@@ -592,6 +596,51 @@ def build_adaptive_policy(
                 "trades": trades,
             })
 
+        exit_breakdown = (
+            {}
+            if source_strategy == "adaptive_router"
+            else dict(diag.get("context_entry_exit_breakdown") or {})
+        )
+        stress_exit = dict(
+            diag.get("stress_context_entry_exit_breakdown") or {}
+        )
+        exit_profiles = dict(diag.get("exit_profiles") or {})
+        for combo, met in exit_breakdown.items():
+            parts = str(combo).split("||")
+            if len(parts) != 3:
+                continue
+            ctx, model, exit_name = parts
+            regime = ctx.split("|", 1)[0]
+            if regime not in {"expansion", "trend", "range"}:
+                continue
+            met = dict(met or {})
+            stress = dict(stress_exit.get(combo) or {})
+            trades = int(met.get("trades") or 0)
+            exp = float(met.get("expectancy_bps") or 0.0)
+            pf = float(met.get("profit_factor") or 0.0)
+            stress_trades = int(stress.get("trades") or 0)
+            stress_exp = float(stress.get("expectancy_bps") or 0.0)
+            stress_pf = float(stress.get("profit_factor") or 0.0)
+            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.05:
+                continue
+            min_stress_trades = max(12, int(min_context_trades) // 2)
+            if (
+                stress
+                and stress_trades >= min_stress_trades
+                and (stress_exp <= 0.0 or stress_pf < 1.0)
+            ):
+                continue
+            profile = dict(exit_profiles.get(exit_name) or {})
+            if not profile:
+                continue
+            exit_candidates.setdefault((ctx, model), []).append({
+                "profile": profile,
+                "score": _evidence_score(met, stress, funnel),
+                "trades": trades,
+                "expectancy_bps": exp,
+                "profit_factor": pf,
+            })
+
         # Distill at most one extra context condition. Time/volume filters
         # must stand on their own sample and stress evidence; complexity pays a
         # score penalty so a broad rule wins unless the narrower rule is clearly
@@ -654,43 +703,6 @@ def build_adaptive_policy(
                     "stress_expectancy_bps": round(stress_exp, 4),
                 })
 
-        if source_strategy != "adaptive_router":
-            continue
-        if not bool(params.get("_adaptive_research_mode", False)):
-            continue
-        exit_breakdown = dict(diag.get("context_exit_breakdown") or {})
-        stress_exit = dict(diag.get("stress_context_exit_breakdown") or {})
-        profiles = dict(diag.get("exit_profiles") or {})
-        for combo, met in exit_breakdown.items():
-            ctx, label = _split_combo_key(str(combo))
-            regime = ctx.split("|", 1)[0]
-            if regime not in {"expansion", "trend", "range"}:
-                continue
-            met = dict(met or {})
-            stress = dict(stress_exit.get(combo) or {})
-            trades = int(met.get("trades") or 0)
-            exp = float(met.get("expectancy_bps") or 0.0)
-            pf = float(met.get("profit_factor") or 0.0)
-            stress_exp = float(stress.get("expectancy_bps") or 0.0)
-            stress_pf = float(stress.get("profit_factor") or 0.0)
-            stress_trades = int(stress.get("trades") or 0)
-            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.05:
-                continue
-            min_stress_trades = max(12, int(min_context_trades) // 2)
-            if (
-                stress
-                and stress_trades >= min_stress_trades
-                and (stress_exp <= 0.0 or stress_pf < 1.0)
-            ):
-                continue
-            profile = dict(profiles.get(label) or {})
-            if not profile:
-                continue
-            exit_candidates.setdefault(ctx, []).append({
-                "profile": profile,
-                "score": _evidence_score(met, stress, funnel),
-                "trades": trades,
-            })
 
     routes: Dict[str, List[dict]] = {}
     for ctx, rows in entry_candidates.items():
@@ -716,11 +728,22 @@ def build_adaptive_policy(
                 ),
                 reverse=True,
             )
+            exit_rows = list(exit_candidates.get((ctx, model)) or [])
+            exit_rows.sort(
+                key=lambda x: (
+                    float(x.get("score") or 0.0),
+                    int(x.get("trades") or 0),
+                ),
+                reverse=True,
+            )
+            if not exit_rows:
+                continue
             row = dict(row)
             row["management_profile"] = (
                 dict(management_rows[0]["profile"])
                 if management_rows else {"name": "baseline"}
             )
+            row["exit_profile"] = dict(exit_rows[0]["profile"])
             chosen.append(row)
             if len(chosen) >= int(max_entries_per_context):
                 break
@@ -728,18 +751,9 @@ def build_adaptive_policy(
             routes[ctx] = chosen
 
     exit_profiles: Dict[str, dict] = {}
-    for ctx, rows in exit_candidates.items():
-        rows.sort(key=lambda x: (float(x.get("score") or 0.0), int(x.get("trades") or 0)), reverse=True)
-        if rows:
-            exit_profiles[ctx] = dict(rows[0]["profile"])
-
-    # A deployable adaptive route must have both a proven entry specialist and
-    # a proven exit profile. Research-only defaults may bootstrap evidence, but
-    # they never survive into the execution policy.
-    routes = {
-        ctx: rows for ctx, rows in routes.items()
-        if ctx in exit_profiles
-    }
+    for ctx, rows in routes.items():
+        if rows and rows[0].get("exit_profile"):
+            exit_profiles[ctx] = dict(rows[0]["exit_profile"])
 
     total_specialists = sum(len(rows) for rows in routes.values())
     return {
