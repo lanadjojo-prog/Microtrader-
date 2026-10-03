@@ -248,7 +248,7 @@ class AdaptiveRouterTests(unittest.TestCase):
                     ctx["key"]: [{
                         "entry_model": "momentum",
                         "entry_params": {"fast": 3, "slow": 12, "entry_bps": 0.01},
-                        "filters": {"volume_bucket": "impossible_bucket"},
+                        "conditions": {"volume_bucket": "impossible_bucket"},
                     }]
                 },
                 "exit_profiles": {
