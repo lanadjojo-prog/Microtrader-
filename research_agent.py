@@ -197,8 +197,8 @@ class ResearchAgent:
             ]
             tf_policy = build_adaptive_policy(
                 tf_results,
-                min_context_trades=8,
-                max_entries_per_context=3,
+                min_context_trades=30,
+                max_entries_per_context=2,
             )
             if tf_policy.get("routes"):
                 timeframe_policies[str(tf)] = tf_policy
@@ -235,8 +235,8 @@ class ResearchAgent:
                 "payoff_ratio": None,
                 "thesis": (
                     f"Adaptive router has {route_count} timeframe-specific market-context routes "
-                    f"and {int(adaptive_policy.get('specialists') or 0)} validated entry specialists; "
-                    "test entry selection and exit profiles independently OOS."
+                    f"and {int(adaptive_policy.get('specialists') or 0)} evidence-backed specialists; "
+                    "distill time, volume, entry, management and exit into the simplest robust rule."
                 ),
             })
 
@@ -297,18 +297,53 @@ class ResearchAgent:
             winrate = float(oos.get("win_rate_pct") or 0)
             exp = float(oos.get("expectancy_bps") or 0)
 
+            diag = dict(best.get("adaptive_diagnostics") or {})
+
+            def _best_dimension(name: str) -> str:
+                rows = dict(diag.get(name) or {})
+                eligible = [
+                    (label, values)
+                    for label, values in rows.items()
+                    if int((values or {}).get("trades") or 0) >= 12
+                    and float((values or {}).get("expectancy_bps") or 0.0) > 0
+                ]
+                eligible.sort(
+                    key=lambda item: (
+                        float((item[1] or {}).get("expectancy_bps") or 0.0),
+                        float((item[1] or {}).get("profit_factor") or 0.0),
+                        int((item[1] or {}).get("trades") or 0),
+                    ),
+                    reverse=True,
+                )
+                return str(eligible[0][0]) if eligible else ""
+
+            best_time = _best_dimension("time_breakdown")
+            best_volume = _best_dimension("volume_breakdown")
+            best_management = _best_dimension("management_model_breakdown")
+            context_bits = []
+            if best_time:
+                context_bits.append(f"time={best_time}")
+            if best_volume:
+                context_bits.append(f"volume={best_volume}")
+            if best_management:
+                context_bits.append(f"management={best_management}")
+            distilled_hint = ", ".join(context_bits)
+
             if fam == "regime_ensemble":
                 thesis = (
                     "regime_ensemble tests whether trend-pullback, breakout and "
                     "VWAP-reversion entries contribute independently across regimes; "
-                    "prioritize only if multiple entry models remain positive OOS."
+                    "keep only simple context rules that survive OOS."
                 )
             elif payoff >= 2.0 and winrate < 50 and exp > 0:
-                thesis = f"{fam} may have a positively skewed payoff profile worth deeper R-multiple testing."
+                thesis = f"{fam} has positive skew; test whether simple profit-protection keeps more MFE without killing large winners."
             elif exp > 0:
-                thesis = f"{fam} shows positive out-of-sample expectancy and should receive local parameter refinement."
+                thesis = f"{fam} has positive OOS expectancy; distill the smallest stable rule instead of adding filters."
             else:
-                thesis = f"{fam} remains under-tested or inconclusive; gather broader evidence before rejection."
+                thesis = f"{fam} is inconclusive; collect context evidence before optimizing parameters."
+
+            if distilled_hint:
+                thesis += f" Current evidence hint: {distilled_hint}."
 
             out.append({
                 "family": fam,
@@ -381,6 +416,11 @@ class ResearchAgent:
         payload["permissions"] = {
             "can_read_research": True,
             "can_steer_experiments": True,
+            "research_dimensions": [
+                "time", "session", "volume", "volatility", "regime",
+                "direction", "pair", "timeframe", "entry", "trade_management", "exit"
+            ],
+            "distillation_goal": "complex research -> simple frozen strategy rules",
             "can_place_orders": False,
             "can_enable_live_trading": False,
         }
