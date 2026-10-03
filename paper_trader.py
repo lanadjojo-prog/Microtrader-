@@ -924,7 +924,6 @@ class PaperTradingEngine:
     async def _manage_entry_bar(
         self, paper_id: str, pair: str, pos: dict, bar: dict, params: dict
     ) -> bool:
-        self._update_position_lifecycle(pos, bar)
         direction = int(pos["direction"])
         low, high = float(bar["l"]), float(bar["h"])
         stop, target = float(pos["stop_price"]), float(pos["target_price"])
@@ -942,6 +941,7 @@ class PaperTradingEngine:
             return True
         # Protection earned on this candle becomes active from the next candle.
         self._maybe_protect_stop(pos, bar, params)
+        self._update_position_lifecycle(pos, bar)
         return False
 
     async def _manage_existing(
@@ -956,7 +956,6 @@ class PaperTradingEngine:
         bars: List[dict],
         index: int,
     ) -> bool:
-        self._update_position_lifecycle(pos, bar)
         direction = int(pos["direction"])
         source = str(params.get("_paper_source") or "forex")
         low, high = float(bar["l"]), float(bar["h"])
@@ -986,12 +985,14 @@ class PaperTradingEngine:
                 strategy, params, bars, index, direction
             )
             if reason:
+                self._update_position_lifecycle(pos, bar)
                 await self._close(
                     paper_id, pair, pos, bar, float(bar["c"]), reason
                 )
                 return True
             held = int(pos.get("bars_held", 0)) + 1
             if held >= int(params.get("max_hold", 36)):
+                self._update_position_lifecycle(pos, bar)
                 await self._close(
                     paper_id, pair, pos, bar, float(bar["c"]), "max_hold"
                 )
@@ -1015,10 +1016,13 @@ class PaperTradingEngine:
             else params.get("max_hold", 36)
         )
         if held >= max_hold:
+            self._update_position_lifecycle(pos, bar)
             await self._close(
                 paper_id, pair, pos, bar, float(bar["c"]), "max_hold"
             )
             return True
+
+        self._update_position_lifecycle(pos, bar)
         return False
 
     async def _close(
@@ -1057,6 +1061,17 @@ class PaperTradingEngine:
             gross = direction * ((float(exit_price) / entry) - 1.0)
             net = gross - (2.0 * float(self.settings.forex_cost_bps) / 10_000.0)
             r_multiple = net / risk_pct if risk_pct > 0 else -1.05
+
+        if risk_distance > 0:
+            exit_move_r = direction * (float(exit_price) - entry) / risk_distance
+            pos["max_favorable_r"] = max(
+                float(pos.get("max_favorable_r") or 0.0),
+                float(exit_move_r),
+            )
+            pos["max_adverse_r"] = max(
+                float(pos.get("max_adverse_r") or 0.0),
+                float(-exit_move_r),
+            )
 
         risk_eur = float(pos["risk_eur"])
         pnl = r_multiple * risk_eur
