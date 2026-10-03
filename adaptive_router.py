@@ -366,6 +366,12 @@ def adaptive_signal(
     exit_profile.setdefault("name", f"{context['regime']}_adaptive_rr")
 
     for route in candidates:
+        conditions = dict(route.get("conditions") or {})
+        if any(
+            str(context.get(name) or "unknown") != str(value)
+            for name, value in conditions.items()
+        ):
+            continue
         model = str(route.get("entry_model") or route.get("strategy") or "")
         entry_params = {
             **_entry_params_for_model(model, params),
@@ -381,6 +387,7 @@ def adaptive_signal(
                 "source_expectancy_bps": float(route.get("source_expectancy_bps") or 0.0),
                 "source_profit_factor": float(route.get("source_profit_factor") or 0.0),
                 "management_profile": dict(route.get("management_profile") or {"name": "baseline"}),
+                "conditions": conditions,
             }
             return direction, model, context, exit_profile, meta
 
@@ -426,6 +433,7 @@ def execution_policy(policy: dict) -> dict:
                 "management_profile": dict(
                     row.get("management_profile") or {"name": "baseline"}
                 ),
+                "conditions": dict(row.get("conditions") or {}),
             })
         if compact:
             routes[str(ctx)] = compact
@@ -464,6 +472,8 @@ def build_adaptive_policy(
         if phase not in {"discovery", "incubator"}:
             continue
         diag = dict(row.get("adaptive_diagnostics") or {})
+        if str(diag.get("context_version") or "") != ADAPTIVE_CONTEXT_VERSION:
+            continue
         entry_breakdown = dict(diag.get("context_entry_breakdown") or {})
         stress_entry = dict(diag.get("stress_context_entry_breakdown") or {})
         if entry_breakdown:
@@ -546,6 +556,53 @@ def build_adaptive_policy(
                 "score": _evidence_score(met, stress, funnel),
                 "trades": trades,
             })
+
+        # Distill at most one extra context condition. Time/volume filters
+        # must stand on their own sample and stress evidence; complexity pays a
+        # score penalty so a broad rule wins unless the narrower rule is clearly
+        # stronger.
+        for diag_key, stress_key, condition_name in (
+            ("context_entry_time_breakdown", "stress_context_entry_time_breakdown", "time_bucket"),
+            ("context_entry_volume_breakdown", "stress_context_entry_volume_breakdown", "volume_bucket"),
+        ):
+            breakdown = dict(diag.get(diag_key) or {})
+            stress_breakdown = dict(diag.get(stress_key) or {})
+            for combo, met in breakdown.items():
+                parts = str(combo).split("||")
+                if len(parts) != 3:
+                    continue
+                ctx, model, bucket = parts
+                regime = ctx.split("|", 1)[0]
+                if regime not in {"expansion", "trend", "range"} or bucket in {"unknown", ""}:
+                    continue
+                met = dict(met or {})
+                stress = dict(stress_breakdown.get(combo) or {})
+                trades = int(met.get("trades") or 0)
+                exp = float(met.get("expectancy_bps") or 0.0)
+                pf = float(met.get("profit_factor") or 0.0)
+                stress_trades = int(stress.get("trades") or 0)
+                stress_exp = float(stress.get("expectancy_bps") or 0.0)
+                stress_pf = float(stress.get("profit_factor") or 0.0)
+                if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.08:
+                    continue
+                min_stress_trades = max(12, int(min_context_trades) // 2)
+                if (
+                    stress
+                    and stress_trades >= min_stress_trades
+                    and (stress_exp <= 0.0 or stress_pf < 1.0)
+                ):
+                    continue
+                entry_candidates.setdefault(ctx, []).append({
+                    "entry_model": model or source_strategy,
+                    "entry_params": _entry_params_for_model(model or source_strategy, params),
+                    "conditions": {condition_name: bucket},
+                    "evidence_score": _evidence_score(met, stress, funnel) - 1.5,
+                    "source_strategy": source_strategy,
+                    "source_trades": trades,
+                    "source_expectancy_bps": round(exp, 4),
+                    "source_profit_factor": round(pf, 4),
+                    "stress_expectancy_bps": round(stress_exp, 4),
+                })
 
         if source_strategy != "adaptive_router":
             continue
@@ -646,6 +703,8 @@ def build_adaptive_policy(
             "principle": "prefer the simplest context + entry + management + exit rule with sufficient evidence",
             "minimum_context_trades": int(min_context_trades),
             "max_specialists_per_context": int(max_entries_per_context),
+            "optional_conditions": ["time_bucket", "volume_bucket"],
+            "max_extra_conditions_per_route": 1,
             "no_proven_route_means_no_trade": True,
         },
         "final_holdout_excluded": True,
