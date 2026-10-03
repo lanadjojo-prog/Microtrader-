@@ -1292,6 +1292,17 @@ def evaluate_candidate(
     ) -> Dict[str, dict]:
         groups: Dict[str, List[dict]] = {}
         for trade in rows:
+            one = str(trade.get(a) or "unknown")
+            two = str(trade.get(b) or "unknown")
+            three = str(trade.get(c) or "unknown")
+            groups.setdefault(f"{one}||{two}||{three}", []).append(trade)
+        return {label: metrics(group) for label, group in groups.items()}
+
+    def _triple_breakdown(
+        rows: List[dict], a: str, b: str, c: str
+    ) -> Dict[str, dict]:
+        groups: Dict[str, List[dict]] = {}
+        for trade in rows:
             labels = [
                 str(trade.get(a) or "unknown"),
                 str(trade.get(b) or "unknown"),
@@ -1342,6 +1353,12 @@ def evaluate_candidate(
         stress_oos_trades, "context_key", "exit_model"
     )
     stress_context_entry_management_breakdown, _ = _management_breakdown(stress_oos_trades)
+    stress_context_entry_time_breakdown = _triple_breakdown(
+        stress_oos_trades, "context_key", "entry_model", "time_bucket"
+    )
+    stress_context_entry_volume_breakdown = _triple_breakdown(
+        stress_oos_trades, "context_key", "entry_model", "volume_bucket"
+    )
 
     ensemble_pass = True
     ensemble_positive_models: List[str] = []
@@ -1561,14 +1578,16 @@ def evaluate_candidate(
             "volume_breakdown": volume_breakdown,
             "volatility_breakdown": volatility_breakdown,
             "trend_direction_breakdown": trend_direction_breakdown,
-            "entry_time_breakdown": context_entry_time_breakdown,
-            "entry_volume_breakdown": context_entry_volume_breakdown,
+            "context_entry_time_breakdown": context_entry_time_breakdown,
+            "context_entry_volume_breakdown": context_entry_volume_breakdown,
             "context_entry_management_breakdown": context_entry_management_breakdown,
             "management_model_breakdown": management_model_breakdown,
             "stress_context_breakdown": stress_context_breakdown,
             "stress_context_entry_breakdown": stress_context_entry_breakdown,
             "stress_context_exit_breakdown": stress_context_exit_breakdown,
             "stress_context_entry_management_breakdown": stress_context_entry_management_breakdown,
+            "stress_context_entry_time_breakdown": stress_context_entry_time_breakdown,
+            "stress_context_entry_volume_breakdown": stress_context_entry_volume_breakdown,
             "management_profiles": MANAGEMENT_PROFILES,
             "lifecycle_summary": {
                 "avg_mfe_r": round(mean([float(t.get("mfe_r") or 0.0) for t in oos_trades]), 3) if oos_trades else 0.0,
