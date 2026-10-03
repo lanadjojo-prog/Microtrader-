@@ -708,6 +708,7 @@ def _context_backfill_candidates(
         if (
             diagnostics.get("context_entry_breakdown")
             and diagnostics.get("context_entry_management_breakdown")
+            and diagnostics.get("context_entry_exit_breakdown")
             and str(diagnostics.get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
         ):
             continue
