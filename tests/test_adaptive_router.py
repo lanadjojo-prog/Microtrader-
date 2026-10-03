@@ -92,9 +92,9 @@ class AdaptiveRouterTests(unittest.TestCase):
                     },
                     "trend|London||trend_pullback||protect_1_5r_0_2r": {
                         "trades": 40,
-                        "expectancy_bps": 5.0,
-                        "profit_factor": 1.45,
-                        "max_loss_streak": 3,
+                        "expectancy_bps": 7.0,
+                        "profit_factor": 1.65,
+                        "max_loss_streak": 2,
                     },
                 },
                 "stress_context_entry_management_breakdown": {
@@ -105,8 +105,8 @@ class AdaptiveRouterTests(unittest.TestCase):
                     },
                     "trend|London||trend_pullback||protect_1_5r_0_2r": {
                         "trades": 20,
-                        "expectancy_bps": 1.2,
-                        "profit_factor": 1.12,
+                        "expectancy_bps": 2.0,
+                        "profit_factor": 1.20,
                     },
                 },
                 "management_profiles": {
