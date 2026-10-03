@@ -207,6 +207,119 @@ class AdaptiveRouterTests(unittest.TestCase):
         }
         self.assertEqual(execution_policy(base), execution_policy(changed_evidence))
 
+    def test_policy_can_distill_one_time_condition(self):
+        base_diag = {
+            "context_version": ADAPTIVE_CONTEXT_VERSION,
+            "context_entry_breakdown": {
+                "trend|London||momentum": {
+                    "trades": 80,
+                    "expectancy_bps": 1.2,
+                    "profit_factor": 1.10,
+                    "max_loss_streak": 4,
+                }
+            },
+            "stress_context_entry_breakdown": {
+                "trend|London||momentum": {
+                    "trades": 40,
+                    "expectancy_bps": 0.4,
+                    "profit_factor": 1.03,
+                }
+            },
+            "context_entry_time_breakdown": {
+                "trend|London||momentum||london_open": {
+                    "trades": 40,
+                    "expectancy_bps": 4.0,
+                    "profit_factor": 1.35,
+                    "max_loss_streak": 2,
+                }
+            },
+            "stress_context_entry_time_breakdown": {
+                "trend|London||momentum||london_open": {
+                    "trades": 20,
+                    "expectancy_bps": 1.0,
+                    "profit_factor": 1.10,
+                }
+            },
+        }
+        entry_row = {
+            "strategy": "momentum",
+            "params": {
+                "_phase": "discovery",
+                "fast": 4,
+                "slow": 16,
+                "entry_bps": 8.0,
+            },
+            "funnel_score": 55.0,
+            "adaptive_diagnostics": base_diag,
+        }
+        exit_row = {
+            "strategy": "adaptive_router",
+            "params": {
+                "_phase": "discovery",
+                "_adaptive_research_mode": True,
+            },
+            "funnel_score": 55.0,
+            "adaptive_diagnostics": {
+                "context_version": ADAPTIVE_CONTEXT_VERSION,
+                "context_entry_breakdown": {},
+                "stress_context_entry_breakdown": {},
+                "context_exit_breakdown": {
+                    "trend|London||trend_atr_2_5r": {
+                        "trades": 40,
+                        "expectancy_bps": 2.0,
+                        "profit_factor": 1.25,
+                        "max_loss_streak": 3,
+                    }
+                },
+                "stress_context_exit_breakdown": {
+                    "trend|London||trend_atr_2_5r": {
+                        "trades": 20,
+                        "expectancy_bps": 0.5,
+                        "profit_factor": 1.05,
+                    }
+                },
+                "exit_profiles": {
+                    "trend_atr_2_5r": {
+                        "name": "trend_atr_2_5r",
+                        "stop_atr": 1.0,
+                        "target_r": 2.5,
+                        "max_hold": 32,
+                    }
+                },
+            },
+        }
+        policy = build_adaptive_policy(
+            [entry_row, exit_row],
+            min_context_trades=30,
+            max_entries_per_context=2,
+        )
+        route = policy["routes"]["trend|London"][0]
+        self.assertEqual(route["entry_model"], "momentum")
+        self.assertEqual(
+            route["conditions"],
+            {"time_bucket": "london_open"},
+        )
+        self.assertLessEqual(len(route["conditions"]), 1)
+
+    def test_old_context_version_cannot_feed_router(self):
+        row = {
+            "strategy": "momentum",
+            "params": {"_phase": "discovery"},
+            "funnel_score": 99.0,
+            "adaptive_diagnostics": {
+                "context_version": "adaptive-context-v1",
+                "context_entry_breakdown": {
+                    "trend|London||momentum": {
+                        "trades": 1000,
+                        "expectancy_bps": 50.0,
+                        "profit_factor": 5.0,
+                    }
+                },
+            },
+        }
+        policy = build_adaptive_policy([row], min_context_trades=30)
+        self.assertEqual(policy["routes"], {})
+
     def test_adaptive_signal_has_no_execution_fallback_without_evidence(self):
         bars = _bars()
         params = {
