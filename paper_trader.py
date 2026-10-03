@@ -997,6 +997,7 @@ class PaperTradingEngine:
                     paper_id, pair, pos, bar, float(bar["c"]), "max_hold"
                 )
                 return True
+            self._update_position_lifecycle(pos, bar)
             return False
 
         target = float(pos["target_price"])
