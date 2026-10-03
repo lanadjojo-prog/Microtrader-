@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from statistics import mean, pstdev
 from typing import Any, Dict, List, Tuple
 
 from market_filters import active_session, relative_volume
 
-ADAPTIVE_CONTEXT_VERSION = "adaptive-context-v1"
+ADAPTIVE_CONTEXT_VERSION = "adaptive-context-v2-distilled-management"
 
 
 def _atr(bars: List[dict], i: int, window: int = 14) -> float:
@@ -115,6 +116,33 @@ def market_context(
         min(i, len(bars) - 1),
         int(params.get("volume_window", 50)),
     )
+    if vol_ratio_rel is None:
+        volume_bucket = "unknown"
+    elif float(vol_ratio_rel) < 0.85:
+        volume_bucket = "low"
+    elif float(vol_ratio_rel) > 1.20:
+        volume_bucket = "high"
+    else:
+        volume_bucket = "normal"
+
+    hour_utc = None
+    try:
+        hour_utc = datetime.fromisoformat(str(entry_time).replace("Z", "+00:00")).hour
+    except Exception:
+        pass
+    if hour_utc is None:
+        time_bucket = "unknown"
+    elif 6 <= hour_utc < 10:
+        time_bucket = "london_open"
+    elif 10 <= hour_utc < 13:
+        time_bucket = "london_mid"
+    elif 13 <= hour_utc < 16:
+        time_bucket = "overlap"
+    elif 16 <= hour_utc < 21:
+        time_bucket = "new_york"
+    else:
+        time_bucket = "off_hours"
+
     vw = _rolling_vwap(bars, i - vwap_window, i)
     last_close = float(bars[i - 1]["c"])
     vwap_distance_bps = ((last_close / vw) - 1.0) * 10_000.0 if vw > 0 else 0.0
@@ -128,6 +156,9 @@ def market_context(
         "trend_strength_atr": round(trend_strength, 4),
         "atr_ratio": round(vol_ratio, 4),
         "relative_volume": round(float(vol_ratio_rel), 4) if vol_ratio_rel is not None else None,
+        "volume_bucket": volume_bucket,
+        "hour_utc": hour_utc,
+        "time_bucket": time_bucket,
         "vwap_distance_bps": round(vwap_distance_bps, 3),
     }
     context["key"] = context_key(context)
@@ -301,15 +332,30 @@ def adaptive_signal(
     routes = dict(policy.get("routes") or {})
     key = context_key(context)
     candidates = list(routes.get(key) or routes.get(f"{context['regime']}|*") or [])
+    research_defaults = bool(params.get("_adaptive_research_mode", False))
     if not candidates:
-        candidates = _default_entries(str(context["regime"]))
+        if research_defaults:
+            candidates = _default_entries(str(context["regime"]))
+        else:
+            return 0, "none", context, {}, {
+                "context_key": key,
+                "no_trade_reason": "no_proven_route",
+            }
 
     exit_profiles = dict(policy.get("exit_profiles") or {})
-    exit_profile = dict(
+    learned_exit = (
         exit_profiles.get(key)
         or exit_profiles.get(f"{context['regime']}|*")
-        or default_exit_profile(str(context["regime"]))
     )
+    if learned_exit:
+        exit_profile = dict(learned_exit)
+    elif research_defaults:
+        exit_profile = default_exit_profile(str(context["regime"]))
+    else:
+        return 0, "none", context, {}, {
+            "context_key": key,
+            "no_trade_reason": "no_proven_exit",
+        }
 
     target_scale = max(0.25, float(params.get("adaptive_exit_target_scale", 1.0)))
     hold_scale = max(0.25, float(params.get("adaptive_exit_hold_scale", 1.0)))
@@ -334,6 +380,7 @@ def adaptive_signal(
                 "source_trades": int(route.get("source_trades") or 0),
                 "source_expectancy_bps": float(route.get("source_expectancy_bps") or 0.0),
                 "source_profit_factor": float(route.get("source_profit_factor") or 0.0),
+                "management_profile": dict(route.get("management_profile") or {"name": "baseline"}),
             }
             return direction, model, context, exit_profile, meta
 
@@ -376,6 +423,9 @@ def execution_policy(policy: dict) -> dict:
                 "source_strategy": str(
                     row.get("source_strategy") or row.get("entry_model") or ""
                 ),
+                "management_profile": dict(
+                    row.get("management_profile") or {"name": "baseline"}
+                ),
             })
         if compact:
             routes[str(ctx)] = compact
@@ -392,8 +442,8 @@ def execution_policy(policy: dict) -> dict:
 def build_adaptive_policy(
     results: List[dict],
     *,
-    min_context_trades: int = 8,
-    max_entries_per_context: int = 3,
+    min_context_trades: int = 30,
+    max_entries_per_context: int = 2,
 ) -> dict:
     """Build a specialist policy from context-labelled OOS evidence.
 
@@ -403,6 +453,7 @@ def build_adaptive_policy(
     """
     entry_candidates: Dict[str, List[dict]] = {}
     exit_candidates: Dict[str, List[dict]] = {}
+    management_candidates: Dict[tuple[str, str], List[dict]] = {}
     evidence_rows = 0
 
     for row in results:
@@ -434,11 +485,12 @@ def build_adaptive_policy(
             stress_exp = float(stress.get("expectancy_bps") or 0.0)
             stress_pf = float(stress.get("profit_factor") or 0.0)
             stress_trades = int(stress.get("trades") or 0)
-            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.02:
+            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.05:
                 continue
+            min_stress_trades = max(12, int(min_context_trades) // 2)
             if (
                 stress
-                and stress_trades >= int(min_context_trades)
+                and stress_trades >= min_stress_trades
                 and (stress_exp <= 0.0 or stress_pf < 1.0)
             ):
                 continue
@@ -451,6 +503,48 @@ def build_adaptive_policy(
                 "source_expectancy_bps": round(exp, 4),
                 "source_profit_factor": round(pf, 4),
                 "stress_expectancy_bps": round(stress_exp, 4),
+            })
+
+        management_breakdown = dict(
+            diag.get("context_entry_management_breakdown") or {}
+        )
+        stress_management = dict(
+            diag.get("stress_context_entry_management_breakdown") or {}
+        )
+        management_profiles = dict(diag.get("management_profiles") or {})
+        for combo, met in management_breakdown.items():
+            parts = str(combo).split("||")
+            if len(parts) != 3:
+                continue
+            ctx, model, management_name = parts
+            regime = ctx.split("|", 1)[0]
+            if regime not in {"expansion", "trend", "range"}:
+                continue
+            met = dict(met or {})
+            stress = dict(stress_management.get(combo) or {})
+            trades = int(met.get("trades") or 0)
+            exp = float(met.get("expectancy_bps") or 0.0)
+            pf = float(met.get("profit_factor") or 0.0)
+            stress_trades = int(stress.get("trades") or 0)
+            stress_exp = float(stress.get("expectancy_bps") or 0.0)
+            stress_pf = float(stress.get("profit_factor") or 0.0)
+            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.05:
+                continue
+            min_stress_trades = max(12, int(min_context_trades) // 2)
+            if (
+                stress
+                and stress_trades >= min_stress_trades
+                and (stress_exp <= 0.0 or stress_pf < 1.0)
+            ):
+                continue
+            profile = dict(
+                management_profiles.get(management_name)
+                or {"name": management_name}
+            )
+            management_candidates.setdefault((ctx, model), []).append({
+                "profile": profile,
+                "score": _evidence_score(met, stress, funnel),
+                "trades": trades,
             })
 
         if source_strategy != "adaptive_router":
@@ -504,6 +598,19 @@ def build_adaptive_policy(
             if not model or model in used_models:
                 continue
             used_models.add(model)
+            management_rows = list(management_candidates.get((ctx, model)) or [])
+            management_rows.sort(
+                key=lambda x: (
+                    float(x.get("score") or 0.0),
+                    int(x.get("trades") or 0),
+                ),
+                reverse=True,
+            )
+            row = dict(row)
+            row["management_profile"] = (
+                dict(management_rows[0]["profile"])
+                if management_rows else {"name": "baseline"}
+            )
             chosen.append(row)
             if len(chosen) >= int(max_entries_per_context):
                 break
@@ -516,9 +623,13 @@ def build_adaptive_policy(
         if rows:
             exit_profiles[ctx] = dict(rows[0]["profile"])
 
-    for ctx in list(routes):
-        regime = ctx.split("|", 1)[0]
-        exit_profiles.setdefault(ctx, default_exit_profile(regime))
+    # A deployable adaptive route must have both a proven entry specialist and
+    # a proven exit profile. Research-only defaults may bootstrap evidence, but
+    # they never survive into the execution policy.
+    routes = {
+        ctx: rows for ctx, rows in routes.items()
+        if ctx in exit_profiles
+    }
 
     total_specialists = sum(len(rows) for rows in routes.values())
     return {
@@ -531,5 +642,11 @@ def build_adaptive_policy(
         "min_context_trades": int(min_context_trades),
         "max_entries_per_context": int(max_entries_per_context),
         "evidence_phases": ["discovery", "incubator"],
+        "distillation": {
+            "principle": "prefer the simplest context + entry + management + exit rule with sufficient evidence",
+            "minimum_context_trades": int(min_context_trades),
+            "max_specialists_per_context": int(max_entries_per_context),
+            "no_proven_route_means_no_trade": True,
+        },
         "final_holdout_excluded": True,
     }
