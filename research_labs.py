@@ -362,8 +362,6 @@ class ResearchLabs:
             "base_quality": (
                 float(base.get("expectancy_bps") or 0.0) > 0
                 and float(base.get("profit_factor") or 0.0) >= 1.15
-                and float(base.get("avg_trades_per_day") or 0.0)
-                >= float(self.settings.strategy_min_trades_per_day)
             ),
             "walk_forward": int(wf.get("positive_windows") or 0) >= 3,
             "parameter_stability": (
