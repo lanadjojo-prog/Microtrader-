@@ -1292,17 +1292,6 @@ def evaluate_candidate(
     ) -> Dict[str, dict]:
         groups: Dict[str, List[dict]] = {}
         for trade in rows:
-            one = str(trade.get(a) or "unknown")
-            two = str(trade.get(b) or "unknown")
-            three = str(trade.get(c) or "unknown")
-            groups.setdefault(f"{one}||{two}||{three}", []).append(trade)
-        return {label: metrics(group) for label, group in groups.items()}
-
-    def _triple_breakdown(
-        rows: List[dict], a: str, b: str, c: str
-    ) -> Dict[str, dict]:
-        groups: Dict[str, List[dict]] = {}
-        for trade in rows:
             labels = [
                 str(trade.get(a) or "unknown"),
                 str(trade.get(b) or "unknown"),
