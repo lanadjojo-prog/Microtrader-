@@ -484,6 +484,8 @@ def build_adaptive_policy(
         source_strategy = str(row.get("strategy") or "")
 
         for combo, met in entry_breakdown.items():
+            if source_strategy == "adaptive_router":
+                continue
             ctx, model = _split_combo_key(str(combo))
             regime = ctx.split("|", 1)[0]
             if regime not in {"expansion", "trend", "range"}:
@@ -539,6 +541,8 @@ def build_adaptive_policy(
                 baseline_management[(parts[0], parts[1])] = dict(baseline_met or {})
 
         for combo, met in management_breakdown.items():
+            if source_strategy == "adaptive_router":
+                continue
             parts = str(combo).split("||")
             if len(parts) != 3:
                 continue
@@ -599,6 +603,8 @@ def build_adaptive_policy(
             breakdown = dict(diag.get(diag_key) or {})
             stress_breakdown = dict(diag.get(stress_key) or {})
             for combo, met in breakdown.items():
+                if source_strategy == "adaptive_router":
+                    continue
                 parts = str(combo).split("||")
                 if len(parts) != 3:
                     continue
@@ -649,6 +655,8 @@ def build_adaptive_policy(
                 })
 
         if source_strategy != "adaptive_router":
+            continue
+        if not bool(params.get("_adaptive_research_mode", False)):
             continue
         exit_breakdown = dict(diag.get("context_exit_breakdown") or {})
         stress_exit = dict(diag.get("stress_context_exit_breakdown") or {})
