@@ -503,7 +503,7 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
-RESEARCH_POLICY_VERSION = "forex-ctrader-v5-streak-gate-holdout20-oos20"
+RESEARCH_POLICY_VERSION = "forex-ctrader-v6-distilled-management-holdout20-oos20"
 FINAL_HOLDOUT_FRACTION = 0.20
 DISCOVERY_SOURCE_BARS = 10000
 INCUBATOR_SOURCE_BARS = 20000
@@ -540,16 +540,6 @@ def discovery_candidates() -> List[Candidate]:
                 "breakout_window": 20, "buffer_bps": 2.0,
                 "vwap_window": 60, "z_entry": 1.4,
                 "stop_atr": 1.0, "target_r": 2.0, "max_hold": 24,
-            }),
-            Candidate("adaptive_router", {
-                **common,
-                "regime_atr_short": 14, "regime_atr_long": 50,
-                "regime_vol_ratio": 1.20, "regime_trend_atr": 0.55,
-                "fast": 8, "slow": 30, "vwap_window": 60,
-                "adaptive_exit_target_scale": 1.0,
-                "adaptive_exit_stop_scale": 1.0,
-                "adaptive_exit_hold_scale": 1.0,
-                "_adaptive_research_mode": True,
             }),
             Candidate("vwap_reversion", {**common, "window": 60, "z_entry": 1.5, "max_hold": 20}),
             Candidate("vwap_momentum", {**common, "window": 60, "buffer_bps": 8.0, "max_hold": 20}),
@@ -718,6 +708,7 @@ def _context_backfill_candidates(
         if (
             diagnostics.get("context_entry_breakdown")
             and diagnostics.get("context_entry_management_breakdown")
+            and diagnostics.get("context_entry_exit_breakdown")
             and str(diagnostics.get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
         ):
             continue
@@ -939,17 +930,6 @@ def choose_batch(
                 "vwap_window": 30 + 5*wave + 2*epoch,
                 "z_entry": round(0.9 + 0.12*wave + 0.02*epoch, 2),
                 "stop_atr": 1.0, "target_r": 2.0, "max_hold": 24}),
-            Candidate("adaptive_router", {"timeframe_min": tf, "_phase": "discovery",
-                "regime_atr_short": 8 + wave,
-                "regime_atr_long": 40 + 5*wave + 2*epoch,
-                "regime_vol_ratio": round(1.05 + 0.05*wave + 0.01*epoch, 2),
-                "regime_trend_atr": round(0.25 + 0.07*wave + 0.01*epoch, 2),
-                "fast": 4 + wave, "slow": 20 + 4*wave + 2*epoch,
-                "vwap_window": 30 + 5*wave + 2*epoch,
-                "adaptive_exit_target_scale": round(0.8 + 0.08*wave, 2),
-                "adaptive_exit_stop_scale": round(0.85 + 0.05*wave, 2),
-                "adaptive_exit_hold_scale": round(0.75 + 0.08*wave, 2),
-                "_adaptive_research_mode": True}),
             Candidate("vwap_reversion", {"timeframe_min": tf, "_phase": "discovery",
                 "window": 30 + 5*wave + 2*epoch, "z_entry": round(0.9 + 0.12*wave + 0.02*epoch, 2),
                 "max_hold": 10 + 3*wave + epoch}),
@@ -1092,6 +1072,95 @@ MANAGEMENT_PROFILES = {
 }
 
 
+EXIT_PROFILES = {
+    "compact_1_5r": {
+        "name": "compact_1_5r",
+        "stop_atr": 0.9,
+        "target_r": 1.5,
+        "max_hold": 18,
+    },
+    "balanced_2_5r": {
+        "name": "balanced_2_5r",
+        "stop_atr": 1.0,
+        "target_r": 2.5,
+        "max_hold": 32,
+    },
+    "asymmetric_3r": {
+        "name": "asymmetric_3r",
+        "stop_atr": 0.8,
+        "target_r": 3.0,
+        "max_hold": 36,
+    },
+}
+
+
+def _exit_outcomes(
+    trade: dict,
+    bars: List[dict],
+    entry_idx: int,
+    cost_bps: float,
+) -> dict:
+    """Counterfactual simple exits from the same causal entry.
+
+    These are discovery diagnostics only. The selected entry + management +
+    exit combination must later pass a full combined backtest and Validation.
+    """
+    entry = float(trade.get("entry_price") or 0.0)
+    direction = int(trade.get("direction") or 0)
+    atr = _atr(bars, entry_idx, 14)
+    if entry <= 0 or direction not in (-1, 1) or atr <= 0:
+        return {}
+
+    outcomes = {}
+    for name, profile in EXIT_PROFILES.items():
+        risk_distance = atr * float(profile["stop_atr"])
+        if risk_distance <= 0:
+            continue
+        stop = (
+            entry - risk_distance
+            if direction > 0 else entry + risk_distance
+        )
+        target_r = float(profile["target_r"])
+        target = (
+            entry + risk_distance * target_r
+            if direction > 0 else entry - risk_distance * target_r
+        )
+        last_idx = min(
+            entry_idx + int(profile["max_hold"]),
+            len(bars) - 1,
+        )
+        exit_price = float(bars[last_idx]["c"])
+        reason = "max_hold"
+
+        for j in range(entry_idx, last_idx + 1):
+            low = float(bars[j]["l"])
+            high = float(bars[j]["h"])
+            stop_hit = low <= stop if direction > 0 else high >= stop
+            target_hit = high >= target if direction > 0 else low <= target
+            # Conservative ambiguity handling.
+            if stop_hit:
+                exit_price = stop
+                reason = "stop"
+                break
+            if target_hit:
+                exit_price = target
+                reason = "target"
+                break
+
+        gross = (
+            direction * ((exit_price / entry) - 1.0)
+            if entry > 0 else 0.0
+        )
+        net = gross - (2.0 * float(cost_bps) / 10_000.0)
+        risk_pct = risk_distance / entry if entry > 0 else 0.0
+        outcomes[name] = {
+            "net_return": net,
+            "r_multiple": net / risk_pct if risk_pct > 0 else 0.0,
+            "exit_reason": reason,
+        }
+    return outcomes
+
+
 def _trade_lifecycle(
     trade: dict,
     bars: List[dict],
@@ -1232,6 +1301,9 @@ def _annotate_trade_context(
             trade, bars, idx, exit_idx, float(cost_bps)
         )
         trade.update(lifecycle)
+        trade["exit_outcomes"] = _exit_outcomes(
+            trade, bars, idx, float(cost_bps)
+        )
 
 
 def evaluate_candidate(
@@ -1337,6 +1409,31 @@ def evaluate_candidate(
             {label: metrics(group) for label, group in by_profile.items()},
         )
 
+    def _exit_counterfactual_breakdown(
+        rows: List[dict],
+    ) -> tuple[Dict[str, dict], Dict[str, dict]]:
+        by_combo: Dict[str, List[dict]] = {}
+        by_profile: Dict[str, List[dict]] = {}
+        for trade in rows:
+            ctx = str(trade.get("context_key") or "unknown")
+            model = str(trade.get("entry_model") or "unknown")
+            for profile, outcome in dict(trade.get("exit_outcomes") or {}).items():
+                synthetic = dict(trade)
+                synthetic["net_return"] = float(
+                    (outcome or {}).get("net_return") or 0.0
+                )
+                synthetic["r_multiple"] = float(
+                    (outcome or {}).get("r_multiple") or 0.0
+                )
+                by_combo.setdefault(
+                    f"{ctx}||{model}||{profile}", []
+                ).append(synthetic)
+                by_profile.setdefault(str(profile), []).append(synthetic)
+        return (
+            {label: metrics(group) for label, group in by_combo.items()},
+            {label: metrics(group) for label, group in by_profile.items()},
+        )
+
     entry_model_breakdown = _breakdown(oos_trades, "entry_model")
     regime_breakdown = _breakdown(oos_trades, "entry_regime")
     context_breakdown = _breakdown(oos_trades, "context_key")
@@ -1354,6 +1451,9 @@ def evaluate_candidate(
         oos_trades, "context_key", "entry_model", "volume_bucket"
     )
     context_entry_management_breakdown, management_model_breakdown = _management_breakdown(oos_trades)
+    context_entry_exit_breakdown, exit_counterfactual_breakdown = (
+        _exit_counterfactual_breakdown(oos_trades)
+    )
     stress_context_breakdown = _breakdown(stress_oos_trades, "context_key")
     stress_context_entry_breakdown = _combo_breakdown(
         stress_oos_trades, "context_key", "entry_model"
@@ -1362,6 +1462,9 @@ def evaluate_candidate(
         stress_oos_trades, "context_key", "exit_model"
     )
     stress_context_entry_management_breakdown, _ = _management_breakdown(stress_oos_trades)
+    stress_context_entry_exit_breakdown, _ = _exit_counterfactual_breakdown(
+        stress_oos_trades
+    )
     stress_context_entry_time_breakdown = _triple_breakdown(
         stress_oos_trades, "context_key", "entry_model", "time_bucket"
     )
@@ -1591,13 +1694,17 @@ def evaluate_candidate(
             "context_entry_volume_breakdown": context_entry_volume_breakdown,
             "context_entry_management_breakdown": context_entry_management_breakdown,
             "management_model_breakdown": management_model_breakdown,
+            "context_entry_exit_breakdown": context_entry_exit_breakdown,
+            "exit_counterfactual_breakdown": exit_counterfactual_breakdown,
             "stress_context_breakdown": stress_context_breakdown,
             "stress_context_entry_breakdown": stress_context_entry_breakdown,
             "stress_context_exit_breakdown": stress_context_exit_breakdown,
             "stress_context_entry_management_breakdown": stress_context_entry_management_breakdown,
+            "stress_context_entry_exit_breakdown": stress_context_entry_exit_breakdown,
             "stress_context_entry_time_breakdown": stress_context_entry_time_breakdown,
             "stress_context_entry_volume_breakdown": stress_context_entry_volume_breakdown,
             "management_profiles": MANAGEMENT_PROFILES,
+            "exit_profiles": EXIT_PROFILES,
             "lifecycle_summary": {
                 "avg_mfe_r": round(mean([float(t.get("mfe_r") or 0.0) for t in oos_trades]), 3) if oos_trades else 0.0,
                 "avg_mae_r": round(mean([float(t.get("mae_r") or 0.0) for t in oos_trades]), 3) if oos_trades else 0.0,
@@ -1610,7 +1717,7 @@ def evaluate_candidate(
             "router_passed": router_pass,
             "active_contexts": router_active_contexts,
             "positive_contexts": router_positive_contexts,
-            "exit_profiles": {
+            "observed_exit_profiles": {
                 str(t.get("exit_model")): dict(t.get("exit_profile") or {})
                 for t in oos_trades
                 if t.get("exit_model") and t.get("exit_profile")
@@ -2161,7 +2268,9 @@ def _simulate_asymmetric_breakout(candidate: Candidate, symbol: str, bars: List[
                 exit_price=target; x=j; r_mult=target_r; break
         if r_mult is None:
             r_mult=direction*(exit_price-entry)/risk if risk>0 else 0.0
-        trades.append(_trade(symbol,bars[e],bars[x],entry,exit_price,cost_bps,r_mult,direction=direction)); i=x+1
+        trade=_trade(symbol,bars[e],bars[x],entry,exit_price,cost_bps,r_mult,direction=direction)
+        trade["risk_distance"]=risk
+        trades.append(trade); i=x+1
     return trades
 
 def _trade(
