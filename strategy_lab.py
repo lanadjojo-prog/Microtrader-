@@ -254,6 +254,7 @@ class StrategyLab:
                 and str((row.get("params") or {}).get("data_source") or "") == "ctrader"
                 and str((row.get("params") or {}).get("direction_mode") or "") == "long_short"
                 and str((row.get("params") or {}).get("_policy_version") or "") == RESEARCH_POLICY_VERSION
+                and str((row.get("adaptive_diagnostics") or {}).get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
             ]
             persisted_signatures = await self.store.load_signatures()
             persisted_state = await self.store.load_state()
@@ -268,7 +269,7 @@ class StrategyLab:
                 int(persisted_state.get("tested_total", len(seen))),
                 len(seen),
             )
-            self.state.promoted_total = int(persisted_state.get("promoted_total", len(promoted)))
+            self.state.promoted_total = len(promoted)
             self._results = list(results)
             log.info(
                 "Strategy Lab resume: loaded_results=%s loaded_signatures=%s generation=%s tested_total=%s promoted_total=%s",
@@ -548,6 +549,7 @@ def discovery_candidates() -> List[Candidate]:
                 "adaptive_exit_target_scale": 1.0,
                 "adaptive_exit_stop_scale": 1.0,
                 "adaptive_exit_hold_scale": 1.0,
+                "_adaptive_research_mode": True,
             }),
             Candidate("vwap_reversion", {**common, "window": 60, "z_entry": 1.5, "max_hold": 20}),
             Candidate("vwap_momentum", {**common, "window": 60, "buffer_bps": 8.0, "max_hold": 20}),
@@ -713,7 +715,11 @@ def _context_backfill_candidates(
         if not strategy or strategy == "adaptive_router":
             continue
         diagnostics = dict(row.get("adaptive_diagnostics") or {})
-        if diagnostics.get("context_entry_breakdown"):
+        if (
+            diagnostics.get("context_entry_breakdown")
+            and diagnostics.get("context_entry_management_breakdown")
+            and str(diagnostics.get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
+        ):
             continue
         params = dict(row.get("params") or {})
         if not params:
@@ -819,6 +825,7 @@ def choose_batch(
                 "adaptive_exit_target_scale": 1.0,
                 "adaptive_exit_stop_scale": 1.0,
                 "adaptive_exit_hold_scale": 1.0,
+                "_adaptive_research_mode": False,
                 "adaptive_policy": adaptive_policy,
             }
             candidate = Candidate("adaptive_router", params)
@@ -941,7 +948,8 @@ def choose_batch(
                 "vwap_window": 30 + 5*wave + 2*epoch,
                 "adaptive_exit_target_scale": round(0.8 + 0.08*wave, 2),
                 "adaptive_exit_stop_scale": round(0.85 + 0.05*wave, 2),
-                "adaptive_exit_hold_scale": round(0.75 + 0.08*wave, 2)}),
+                "adaptive_exit_hold_scale": round(0.75 + 0.08*wave, 2),
+                "_adaptive_research_mode": True}),
             Candidate("vwap_reversion", {"timeframe_min": tf, "_phase": "discovery",
                 "window": 30 + 5*wave + 2*epoch, "z_entry": round(0.9 + 0.12*wave + 0.02*epoch, 2),
                 "max_hold": 10 + 3*wave + epoch}),
@@ -1064,10 +1072,142 @@ def _candidate_exit_model(candidate: Candidate) -> str:
     return f"time_exit_hold{int(p.get('max_hold', 24))}"
 
 
+MANAGEMENT_PROFILES = {
+    "baseline": {"name": "baseline"},
+    "protect_1r_be": {
+        "name": "protect_1r_be",
+        "management_trigger_r": 1.0,
+        "management_lock_net_r": 0.0,
+    },
+    "protect_1_5r_0_2r": {
+        "name": "protect_1_5r_0_2r",
+        "management_trigger_r": 1.5,
+        "management_lock_net_r": 0.2,
+    },
+    "protect_2r_0_5r": {
+        "name": "protect_2r_0_5r",
+        "management_trigger_r": 2.0,
+        "management_lock_net_r": 0.5,
+    },
+}
+
+
+def _trade_lifecycle(
+    trade: dict,
+    bars: List[dict],
+    entry_idx: int,
+    exit_idx: int,
+    cost_bps: float,
+) -> dict:
+    """Measure the full path and counterfactual profit-protection outcomes.
+
+    Management is intentionally simple. A protection level earned on a bar
+    becomes active on the next bar, matching forward paper semantics and
+    avoiding same-bar look-ahead.
+    """
+    entry = float(trade.get("entry_price") or 0.0)
+    direction = int(trade.get("direction") or 0)
+    risk_distance = float(trade.get("risk_distance") or 0.0) or _atr(
+        bars, entry_idx, 14
+    )
+    if entry <= 0 or direction not in (-1, 1) or risk_distance <= 0:
+        return {
+            "mfe_r": 0.0,
+            "mae_r": 0.0,
+            "giveback_r": 0.0,
+            "risk_distance": 0.0,
+            "management_outcomes": {},
+        }
+
+    risk_pct = risk_distance / entry
+    roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
+    baseline_net_r = (
+        float(trade.get("net_return") or 0.0) / risk_pct
+        if risk_pct > 0 else 0.0
+    )
+    last_idx = min(exit_idx, len(bars) - 1)
+    exit_price = float(trade.get("exit_price") or entry)
+
+    mfe_r = 0.0
+    mae_r = 0.0
+    # Full OHLC ranges are only observable while the position survives the bar.
+    # On the actual exit bar use only the exit price, never later candle range.
+    for j in range(entry_idx, last_idx):
+        hi = float(bars[j]["h"])
+        lo = float(bars[j]["l"])
+        favorable = (
+            (hi - entry) / risk_distance
+            if direction > 0 else (entry - lo) / risk_distance
+        )
+        adverse = (
+            (entry - lo) / risk_distance
+            if direction > 0 else (hi - entry) / risk_distance
+        )
+        mfe_r = max(mfe_r, favorable)
+        mae_r = max(mae_r, adverse)
+
+    exit_move_r = direction * (exit_price - entry) / risk_distance
+    mfe_r = max(mfe_r, exit_move_r)
+    mae_r = max(mae_r, -exit_move_r)
+
+    outcomes = {}
+    for name, profile in MANAGEMENT_PROFILES.items():
+        if name == "baseline":
+            outcomes[name] = {
+                "net_return": float(trade.get("net_return") or 0.0),
+                "r_multiple": baseline_net_r,
+            }
+            continue
+
+        trigger = float(profile["management_trigger_r"])
+        lock_net_r = float(profile["management_lock_net_r"])
+        triggered = False
+        managed_net_r = baseline_net_r
+        for j in range(entry_idx, last_idx + 1):
+            hi = float(bars[j]["h"])
+            lo = float(bars[j]["l"])
+
+            # A protection level earned on an earlier bar is active now.
+            if triggered:
+                lock_gross_return = lock_net_r * risk_pct + roundtrip_cost_pct
+                lock_price = entry * (
+                    1.0 + (lock_gross_return / float(direction))
+                )
+                lock_hit = lo <= lock_price if direction > 0 else hi >= lock_price
+                if lock_hit:
+                    managed_net_r = lock_net_r
+                    break
+
+            # Do not create a trigger from movement after the actual exit.
+            if j >= last_idx:
+                break
+
+            favorable = (
+                (hi - entry) / risk_distance
+                if direction > 0 else (entry - lo) / risk_distance
+            )
+            if not triggered and favorable >= trigger:
+                triggered = True
+
+        outcomes[name] = {
+            "net_return": managed_net_r * risk_pct,
+            "r_multiple": managed_net_r,
+        }
+
+    return {
+        "mfe_r": round(mfe_r, 4),
+        "mae_r": round(mae_r, 4),
+        "giveback_r": round(max(0.0, mfe_r - baseline_net_r), 4),
+        "risk_distance": risk_distance,
+        "management_outcomes": outcomes,
+    }
+
+
 def _annotate_trade_context(
     candidate: Candidate,
     trades: List[dict],
     bars: List[dict],
+    cost_bps: float = 0.0,
 ) -> None:
     if not trades or not bars:
         return
@@ -1077,12 +1217,21 @@ def _annotate_trade_context(
         idx = by_time.get(str(trade.get("entry_time") or ""))
         if idx is None:
             continue
+        exit_idx = by_time.get(str(trade.get("exit_time") or ""), idx)
         context = dict(trade.get("entry_context") or market_context(bars, idx, candidate.params))
         trade.setdefault("entry_model", candidate.strategy)
         trade.setdefault("entry_regime", str(context.get("regime") or "unknown"))
         trade["entry_context"] = context
         trade.setdefault("context_key", context_key(context))
         trade.setdefault("exit_model", default_exit)
+        trade["time_bucket"] = str(context.get("time_bucket") or "unknown")
+        trade["volume_bucket"] = str(context.get("volume_bucket") or "unknown")
+        trade["volatility_bucket"] = str(context.get("volatility") or "unknown")
+        trade["trend_direction"] = str(context.get("trend_direction") or "unknown")
+        lifecycle = _trade_lifecycle(
+            trade, bars, idx, exit_idx, float(cost_bps)
+        )
+        trade.update(lifecycle)
 
 
 def evaluate_candidate(
@@ -1123,13 +1272,14 @@ def evaluate_candidate(
         test = bars[split:]
         train_days.update(str(x.get("t") or "")[:10] for x in train if x.get("t"))
         oos_days.update(str(x.get("t") or "")[:10] for x in test if x.get("t"))
-
         symbol_train = simulate(candidate, symbol, train, cost_bps)
         symbol_oos = simulate(candidate, symbol, test, cost_bps)
         symbol_stress = simulate(candidate, symbol, test, cost_bps * stress_cost_multiplier)
-        _annotate_trade_context(candidate, symbol_train, train)
-        _annotate_trade_context(candidate, symbol_oos, test)
-        _annotate_trade_context(candidate, symbol_stress, test)
+        _annotate_trade_context(candidate, symbol_train, train, cost_bps)
+        _annotate_trade_context(candidate, symbol_oos, test, cost_bps)
+        _annotate_trade_context(
+            candidate, symbol_stress, test, cost_bps * stress_cost_multiplier
+        )
         train_trades.extend(symbol_train)
         oos_trades.extend(symbol_oos)
         stress_oos_trades.extend(symbol_stress)
@@ -1157,18 +1307,66 @@ def evaluate_candidate(
             groups.setdefault(f"{left}||{right}", []).append(trade)
         return {label: metrics(group) for label, group in groups.items()}
 
+    def _triple_breakdown(
+        rows: List[dict], a: str, b: str, c: str
+    ) -> Dict[str, dict]:
+        groups: Dict[str, List[dict]] = {}
+        for trade in rows:
+            labels = [
+                str(trade.get(a) or "unknown"),
+                str(trade.get(b) or "unknown"),
+                str(trade.get(c) or "unknown"),
+            ]
+            groups.setdefault("||".join(labels), []).append(trade)
+        return {label: metrics(group) for label, group in groups.items()}
+
+    def _management_breakdown(rows: List[dict]) -> tuple[Dict[str, dict], Dict[str, dict]]:
+        by_combo: Dict[str, List[dict]] = {}
+        by_profile: Dict[str, List[dict]] = {}
+        for trade in rows:
+            ctx = str(trade.get("context_key") or "unknown")
+            model = str(trade.get("entry_model") or "unknown")
+            for profile, outcome in dict(trade.get("management_outcomes") or {}).items():
+                synthetic = dict(trade)
+                synthetic["net_return"] = float((outcome or {}).get("net_return") or 0.0)
+                synthetic["r_multiple"] = float((outcome or {}).get("r_multiple") or 0.0)
+                by_combo.setdefault(f"{ctx}||{model}||{profile}", []).append(synthetic)
+                by_profile.setdefault(str(profile), []).append(synthetic)
+        return (
+            {label: metrics(group) for label, group in by_combo.items()},
+            {label: metrics(group) for label, group in by_profile.items()},
+        )
+
     entry_model_breakdown = _breakdown(oos_trades, "entry_model")
     regime_breakdown = _breakdown(oos_trades, "entry_regime")
     context_breakdown = _breakdown(oos_trades, "context_key")
     exit_model_breakdown = _breakdown(oos_trades, "exit_model")
     context_entry_breakdown = _combo_breakdown(oos_trades, "context_key", "entry_model")
     context_exit_breakdown = _combo_breakdown(oos_trades, "context_key", "exit_model")
+    time_breakdown = _breakdown(oos_trades, "time_bucket")
+    volume_breakdown = _breakdown(oos_trades, "volume_bucket")
+    volatility_breakdown = _breakdown(oos_trades, "volatility_bucket")
+    trend_direction_breakdown = _breakdown(oos_trades, "trend_direction")
+    context_entry_time_breakdown = _triple_breakdown(
+        oos_trades, "context_key", "entry_model", "time_bucket"
+    )
+    context_entry_volume_breakdown = _triple_breakdown(
+        oos_trades, "context_key", "entry_model", "volume_bucket"
+    )
+    context_entry_management_breakdown, management_model_breakdown = _management_breakdown(oos_trades)
     stress_context_breakdown = _breakdown(stress_oos_trades, "context_key")
     stress_context_entry_breakdown = _combo_breakdown(
         stress_oos_trades, "context_key", "entry_model"
     )
     stress_context_exit_breakdown = _combo_breakdown(
         stress_oos_trades, "context_key", "exit_model"
+    )
+    stress_context_entry_management_breakdown, _ = _management_breakdown(stress_oos_trades)
+    stress_context_entry_time_breakdown = _triple_breakdown(
+        stress_oos_trades, "context_key", "entry_model", "time_bucket"
+    )
+    stress_context_entry_volume_breakdown = _triple_breakdown(
+        stress_oos_trades, "context_key", "entry_model", "volume_bucket"
     )
 
     ensemble_pass = True
@@ -1207,10 +1405,19 @@ def evaluate_candidate(
         name for name in router_active_contexts
         if float(context_breakdown[name].get("expectancy_bps") or 0.0) > 0
     ]
+    adaptive_bootstrap = (
+        candidate.strategy == "adaptive_router"
+        and bool(candidate.params.get("_adaptive_research_mode", False))
+    )
+    learned_route_count = len(
+        dict((candidate.params.get("adaptive_policy") or {}).get("routes") or {})
+    )
     router_pass = (
         candidate.strategy != "adaptive_router"
         or (
-            ensemble_pass
+            not adaptive_bootstrap
+            and learned_route_count > 0
+            and ensemble_pass
             and len(router_active_contexts) >= 2
             and len(router_positive_contexts) >= 2
         )
@@ -1267,6 +1474,11 @@ def evaluate_candidate(
             f"{candidate.strategy} lacks robust multi-entry contribution "
             f"(active={len(ensemble_active_models)}, positive={len(ensemble_positive_models)}, "
             f"dominant_share={ensemble_dominant_share:.0%})"
+        )
+    if adaptive_bootstrap:
+        reasons.append(
+            "adaptive research bootstrap collects entry/exit/management evidence only; "
+            "it cannot be promoted"
         )
     if candidate.strategy == "adaptive_router" and not router_pass:
         reasons.append(
@@ -1371,9 +1583,30 @@ def evaluate_candidate(
             "exit_model_breakdown": exit_model_breakdown,
             "context_entry_breakdown": context_entry_breakdown,
             "context_exit_breakdown": context_exit_breakdown,
+            "time_breakdown": time_breakdown,
+            "volume_breakdown": volume_breakdown,
+            "volatility_breakdown": volatility_breakdown,
+            "trend_direction_breakdown": trend_direction_breakdown,
+            "context_entry_time_breakdown": context_entry_time_breakdown,
+            "context_entry_volume_breakdown": context_entry_volume_breakdown,
+            "context_entry_management_breakdown": context_entry_management_breakdown,
+            "management_model_breakdown": management_model_breakdown,
             "stress_context_breakdown": stress_context_breakdown,
             "stress_context_entry_breakdown": stress_context_entry_breakdown,
             "stress_context_exit_breakdown": stress_context_exit_breakdown,
+            "stress_context_entry_management_breakdown": stress_context_entry_management_breakdown,
+            "stress_context_entry_time_breakdown": stress_context_entry_time_breakdown,
+            "stress_context_entry_volume_breakdown": stress_context_entry_volume_breakdown,
+            "management_profiles": MANAGEMENT_PROFILES,
+            "lifecycle_summary": {
+                "avg_mfe_r": round(mean([float(t.get("mfe_r") or 0.0) for t in oos_trades]), 3) if oos_trades else 0.0,
+                "avg_mae_r": round(mean([float(t.get("mae_r") or 0.0) for t in oos_trades]), 3) if oos_trades else 0.0,
+                "avg_giveback_r": round(mean([float(t.get("giveback_r") or 0.0) for t in oos_trades]), 3) if oos_trades else 0.0,
+                "reached_1_5r_then_lost": sum(
+                    1 for t in oos_trades
+                    if float(t.get("mfe_r") or 0.0) >= 1.5 and float(t.get("net_return") or 0.0) < 0
+                ),
+            },
             "router_passed": router_pass,
             "active_contexts": router_active_contexts,
             "positive_contexts": router_positive_contexts,
@@ -1746,6 +1979,7 @@ def _simulate_regime_ensemble(
             symbol, bars[e], bars[x], entry, exit_price, cost_bps,
             r_mult, direction=direction,
         )
+        trade["risk_distance"] = risk
         trade["entry_model"] = entry_model
         trade["entry_regime"] = regime
         trade["exit_reason"] = exit_reason
@@ -1798,6 +2032,15 @@ def _simulate_adaptive_router(
         exit_price = float(bars[x]["o"])
         r_mult = None
         exit_reason = "max_hold"
+        management = dict(route_meta.get("management_profile") or {"name": "baseline"})
+        trigger_r = management.get("management_trigger_r")
+        lock_net_r = management.get("management_lock_net_r")
+        protection_active = False
+        risk_pct = risk / entry if entry > 0 else 0.0
+        cost_r = (
+            (2.0 * float(cost_bps) / 10_000.0) / risk_pct
+            if risk_pct > 0 else 0.0
+        )
         for j in range(e, x + 1):
             lo = float(bars[j]["l"])
             hi = float(bars[j]["h"])
@@ -1806,8 +2049,8 @@ def _simulate_adaptive_router(
             if stop_hit:
                 exit_price = stop
                 x = j
-                r_mult = -1.0
-                exit_reason = "stop"
+                r_mult = direction * (stop - entry) / risk if risk > 0 else -1.0
+                exit_reason = "management_stop" if protection_active else "stop"
                 break
             if target_hit:
                 exit_price = target
@@ -1815,6 +2058,24 @@ def _simulate_adaptive_router(
                 r_mult = target_r
                 exit_reason = "target"
                 break
+            if (
+                trigger_r is not None
+                and lock_net_r is not None
+                and not protection_active
+            ):
+                trigger_price = (
+                    entry + risk * float(trigger_r)
+                    if direction > 0 else entry - risk * float(trigger_r)
+                )
+                reached = hi >= trigger_price if direction > 0 else lo <= trigger_price
+                if reached:
+                    lock_gross_r = float(lock_net_r) + cost_r
+                    protected = (
+                        entry + risk * lock_gross_r
+                        if direction > 0 else entry - risk * lock_gross_r
+                    )
+                    stop = max(stop, protected) if direction > 0 else min(stop, protected)
+                    protection_active = True
         if r_mult is None:
             r_mult = direction * (exit_price - entry) / risk if risk > 0 else 0.0
 
@@ -1822,6 +2083,7 @@ def _simulate_adaptive_router(
             symbol, bars[e], bars[x], entry, exit_price, cost_bps,
             r_mult, direction=direction,
         )
+        trade["risk_distance"] = risk
         trade["entry_model"] = entry_model
         trade["entry_regime"] = str(context.get("regime") or "unknown")
         trade["entry_context"] = context
@@ -1831,6 +2093,8 @@ def _simulate_adaptive_router(
         trade["exit_reason"] = exit_reason
         trade["route_evidence_score"] = float(route_meta.get("evidence_score") or 0.0)
         trade["route_source_strategy"] = str(route_meta.get("source_strategy") or entry_model)
+        trade["management_profile"] = dict(route_meta.get("management_profile") or {"name": "baseline"})
+        trade["management_model"] = str(trade["management_profile"].get("name") or "baseline")
         trades.append(trade)
         i = x + 1
     return trades
@@ -1919,6 +2183,8 @@ def _trade(
         "direction": direction,
         "entry_time": entry_bar.get("t"),
         "exit_time": exit_bar.get("t"),
+        "entry_price": entry_price,
+        "exit_price": exit_price,
         "gross_return": gross,
         "net_return": net,
         "r_multiple": r_multiple,

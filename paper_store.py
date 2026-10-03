@@ -65,7 +65,12 @@ class PaperTradingStore:
                 ADD COLUMN IF NOT EXISTS exit_model TEXT,
                 ADD COLUMN IF NOT EXISTS max_hold_override INTEGER,
                 ADD COLUMN IF NOT EXISTS target_r_override DOUBLE PRECISION,
-                ADD COLUMN IF NOT EXISTS route_evidence_score DOUBLE PRECISION
+                ADD COLUMN IF NOT EXISTS route_evidence_score DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS management_model TEXT,
+                ADD COLUMN IF NOT EXISTS management_trigger_r_override DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS management_lock_net_r_override DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS max_favorable_r DOUBLE PRECISION NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS max_adverse_r DOUBLE PRECISION NOT NULL DEFAULT 0
             """)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS microtrader_paper_trades (
@@ -93,7 +98,11 @@ class PaperTradingStore:
                 ADD COLUMN IF NOT EXISTS entry_regime TEXT,
                 ADD COLUMN IF NOT EXISTS entry_context JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS exit_model TEXT,
-                ADD COLUMN IF NOT EXISTS route_evidence_score DOUBLE PRECISION
+                ADD COLUMN IF NOT EXISTS route_evidence_score DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS management_model TEXT,
+                ADD COLUMN IF NOT EXISTS max_favorable_r DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS max_adverse_r DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS giveback_r DOUBLE PRECISION
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_mt_paper_trades_strategy_time
@@ -258,7 +267,9 @@ class PaperTradingStore:
                        risk_distance, stop_price, target_price, bars_held, risk_eur,
                        current_price, unrealized_r, unrealized_pnl, last_mark_at,
                        entry_model, entry_regime, entry_context, exit_model,
-                       max_hold_override, target_r_override, route_evidence_score
+                       max_hold_override, target_r_override, route_evidence_score,
+                       management_model, management_trigger_r_override,
+                       management_lock_net_r_override, max_favorable_r, max_adverse_r
                 FROM microtrader_paper_positions
                 WHERE paper_id=%s
                 ORDER BY pair
@@ -278,8 +289,10 @@ class PaperTradingStore:
                     risk_distance, stop_price, target_price, bars_held, risk_eur,
                     current_price, unrealized_r, unrealized_pnl, last_mark_at,
                     entry_model, entry_regime, entry_context, exit_model,
-                    max_hold_override, target_r_override, route_evidence_score
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)
+                    max_hold_override, target_r_override, route_evidence_score,
+                    management_model, management_trigger_r_override,
+                    management_lock_net_r_override, max_favorable_r, max_adverse_r
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (paper_id, pair) DO UPDATE SET
                     direction=EXCLUDED.direction,
                     entry_time=EXCLUDED.entry_time,
@@ -299,7 +312,12 @@ class PaperTradingStore:
                     exit_model=EXCLUDED.exit_model,
                     max_hold_override=EXCLUDED.max_hold_override,
                     target_r_override=EXCLUDED.target_r_override,
-                    route_evidence_score=EXCLUDED.route_evidence_score
+                    route_evidence_score=EXCLUDED.route_evidence_score,
+                    management_model=EXCLUDED.management_model,
+                    management_trigger_r_override=EXCLUDED.management_trigger_r_override,
+                    management_lock_net_r_override=EXCLUDED.management_lock_net_r_override,
+                    max_favorable_r=EXCLUDED.max_favorable_r,
+                    max_adverse_r=EXCLUDED.max_adverse_r
                 """,
                 (
                     paper_id, pair, int(position["direction"]),
@@ -327,6 +345,17 @@ class PaperTradingStore:
                         float(position["route_evidence_score"])
                         if position.get("route_evidence_score") is not None else None
                     ),
+                    position.get("management_model"),
+                    (
+                        float(position["management_trigger_r_override"])
+                        if position.get("management_trigger_r_override") is not None else None
+                    ),
+                    (
+                        float(position["management_lock_net_r_override"])
+                        if position.get("management_lock_net_r_override") is not None else None
+                    ),
+                    float(position.get("max_favorable_r") or 0.0),
+                    float(position.get("max_adverse_r") or 0.0),
                 ),
             )
             await conn.commit()
@@ -389,6 +418,10 @@ class PaperTradingStore:
         entry_context: dict | None = None,
         exit_model: str | None = None,
         route_evidence_score: float | None = None,
+        management_model: str | None = None,
+        max_favorable_r: float | None = None,
+        max_adverse_r: float | None = None,
+        giveback_r: float | None = None,
     ) -> float:
         if not self.enabled:
             return 0.0
@@ -419,8 +452,9 @@ class PaperTradingStore:
                     entry_price, exit_price, exit_reason, risk_eur,
                     r_multiple, pnl, balance_before, balance_after,
                     entry_model, entry_regime, entry_context, exit_model,
-                    route_evidence_score
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+                    route_evidence_score, management_model,
+                    max_favorable_r, max_adverse_r, giveback_r
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     paper_id, pair, side, entry_time, exit_time,
@@ -429,6 +463,10 @@ class PaperTradingStore:
                     entry_model, entry_regime, json.dumps(entry_context or {}),
                     exit_model,
                     float(route_evidence_score) if route_evidence_score is not None else None,
+                    management_model,
+                    float(max_favorable_r) if max_favorable_r is not None else None,
+                    float(max_adverse_r) if max_adverse_r is not None else None,
+                    float(giveback_r) if giveback_r is not None else None,
                 ),
             )
             await conn.execute(
@@ -557,6 +595,8 @@ class PaperTradingStore:
                                    t.r_multiple, t.pnl, t.balance_before, t.balance_after,
                                    t.entry_model, t.entry_regime, t.entry_context,
                                    t.exit_model, t.route_evidence_score,
+                                   t.management_model, t.max_favorable_r,
+                                   t.max_adverse_r, t.giveback_r,
                                    s.strategy, s.params,
                                    ROW_NUMBER() OVER (
                                        PARTITION BY t.paper_id
@@ -571,6 +611,8 @@ class PaperTradingStore:
                                r_multiple, pnl, balance_before, balance_after,
                                entry_model, entry_regime, entry_context,
                                exit_model, route_evidence_score,
+                               management_model, max_favorable_r,
+                               max_adverse_r, giveback_r,
                                strategy, params
                         FROM ranked
                         WHERE rn <= %s
@@ -590,6 +632,9 @@ class PaperTradingStore:
                                p.last_mark_at, p.entry_model, p.entry_regime,
                                p.entry_context, p.exit_model, p.max_hold_override,
                                p.target_r_override, p.route_evidence_score,
+                               p.management_model, p.management_trigger_r_override,
+                               p.management_lock_net_r_override,
+                               p.max_favorable_r, p.max_adverse_r,
                                s.strategy, s.params
                         FROM microtrader_paper_positions p
                         JOIN microtrader_paper_strategies s ON s.paper_id=p.paper_id

@@ -6,6 +6,8 @@ import psycopg
 from db_connection import connect_db
 from psycopg.rows import dict_row
 
+RESEARCH_VALIDATION_VERSION = "robust-v2-walkforward-stability-cost"
+
 
 class ResearchStore:
     def __init__(self, database_url: str):
@@ -96,7 +98,9 @@ class ResearchStore:
                 SELECT candidate_signature
                 FROM microtrader_research_validations
                 WHERE status='completed'
-                """
+                  AND COALESCE(summary->>'validation_version', '') = %s
+                """,
+                (RESEARCH_VALIDATION_VERSION,),
             )
             return {str(row[0]) for row in await cur.fetchall()}
 
@@ -107,14 +111,7 @@ class ResearchStore:
         min_trades_per_day: float,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Validated Research candidates that are truly eligible for paper.
-
-        Eligibility requires all of:
-        - 17-stage validation completed;
-        - the exact frozen candidate is promoted in Research;
-        - current Research policy version;
-        - current hard trades/day minimum.
-        """
+        """Frozen Research candidates that passed the simplified Validation gate."""
         if not self.enabled:
             return []
         async with connect_db(
@@ -128,13 +125,17 @@ class ResearchStore:
                        v.params,
                        v.summary,
                        r.oos,
+                       r.stress_oos,
                        r.funnel_score,
+                       r.adaptive_diagnostics,
                        r.tested_at
                 FROM microtrader_research_validations v
                 JOIN microtrader_forex_research_strategy_results r
                   ON r.strategy = v.strategy
                  AND r.params = v.params
                 WHERE v.status = 'completed'
+                  AND COALESCE(v.summary->>'validation_version', '') = %s
+                  AND COALESCE((v.summary->>'passed')::boolean, FALSE) = TRUE
                   AND r.funnel_stage = 'promoted'
                   AND r.promoted = TRUE
                   AND COALESCE(r.params->>'_policy_version', '') = %s
@@ -143,6 +144,7 @@ class ResearchStore:
                 LIMIT %s
                 """,
                 (
+                    RESEARCH_VALIDATION_VERSION,
                     str(research_policy_version),
                     float(min_trades_per_day),
                     max(1, int(limit)),

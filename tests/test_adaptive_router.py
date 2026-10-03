@@ -1,6 +1,7 @@
 import unittest
 
 from adaptive_router import (
+    ADAPTIVE_CONTEXT_VERSION,
     adaptive_signal,
     build_adaptive_policy,
     execution_policy,
@@ -51,46 +52,99 @@ class AdaptiveRouterTests(unittest.TestCase):
         self.assertIn(before["regime"], {"expansion", "trend", "range"})
 
     def test_policy_uses_positive_context_specialists_only(self):
-        results = [{
-            "strategy": "trend_pullback",
-            "params": {"fast": 8, "slow": 30, "pullback_z": 1.0},
-            "funnel_score": 62.0,
-            "adaptive_diagnostics": {
-                "context_entry_breakdown": {
-                    "trend|London||trend_pullback": {
-                        "trades": 12,
-                        "expectancy_bps": 4.5,
-                        "profit_factor": 1.4,
-                        "max_loss_streak": 3,
+        results = [
+            {
+                "strategy": "trend_pullback",
+                "params": {"fast": 8, "slow": 30, "pullback_z": 1.0},
+                "funnel_score": 62.0,
+                "adaptive_diagnostics": {
+                    "context_version": ADAPTIVE_CONTEXT_VERSION,
+                    "context_entry_breakdown": {
+                        "trend|London||trend_pullback": {
+                            "trades": 40,
+                            "expectancy_bps": 4.5,
+                            "profit_factor": 1.4,
+                            "max_loss_streak": 3,
+                        },
+                        "range|London||trend_pullback": {
+                            "trades": 40,
+                            "expectancy_bps": -2.0,
+                            "profit_factor": 0.8,
+                            "max_loss_streak": 5,
+                        },
                     },
-                    "range|London||trend_pullback": {
-                        "trades": 12,
-                        "expectancy_bps": -2.0,
-                        "profit_factor": 0.8,
-                        "max_loss_streak": 5,
+                    "stress_context_entry_breakdown": {
+                        "trend|London||trend_pullback": {
+                            "trades": 20,
+                            "expectancy_bps": 1.2,
+                            "profit_factor": 1.15,
+                        }
                     },
-                },
-                "stress_context_entry_breakdown": {
-                    "trend|London||trend_pullback": {
-                        "trades": 12,
-                        "expectancy_bps": 1.2,
-                        "profit_factor": 1.15,
+                    "context_entry_management_breakdown": {
+                        "trend|London||trend_pullback||protect_1_5r_0_2r": {
+                            "trades": 40,
+                            "expectancy_bps": 4.8,
+                            "profit_factor": 1.45,
+                            "max_loss_streak": 3,
+                        }
                     },
-                    "range|London||trend_pullback": {
-                        "trades": 12,
-                        "expectancy_bps": -4.0,
-                        "profit_factor": 0.7,
+                    "stress_context_entry_management_breakdown": {
+                        "trend|London||trend_pullback||protect_1_5r_0_2r": {
+                            "trades": 20,
+                            "expectancy_bps": 1.1,
+                            "profit_factor": 1.12,
+                        }
+                    },
+                    "management_profiles": {
+                        "protect_1_5r_0_2r": {
+                            "name": "protect_1_5r_0_2r",
+                            "management_trigger_r": 1.5,
+                            "management_lock_net_r": 0.2,
+                        }
                     },
                 },
             },
-        }]
-        policy = build_adaptive_policy(results, min_context_trades=4)
+            {
+                "strategy": "adaptive_router",
+                "params": {"_phase": "discovery", "_adaptive_research_mode": True},
+                "funnel_score": 55.0,
+                "adaptive_diagnostics": {
+                    "context_version": ADAPTIVE_CONTEXT_VERSION,
+                    "context_entry_breakdown": {},
+                    "stress_context_entry_breakdown": {},
+                    "context_exit_breakdown": {
+                        "trend|London||trend_atr_2_5r": {
+                            "trades": 40,
+                            "expectancy_bps": 3.0,
+                            "profit_factor": 1.3,
+                            "max_loss_streak": 3,
+                        }
+                    },
+                    "stress_context_exit_breakdown": {
+                        "trend|London||trend_atr_2_5r": {
+                            "trades": 20,
+                            "expectancy_bps": 0.8,
+                            "profit_factor": 1.08,
+                        }
+                    },
+                    "exit_profiles": {
+                        "trend_atr_2_5r": {
+                            "name": "trend_atr_2_5r",
+                            "stop_atr": 1.0,
+                            "target_r": 2.5,
+                            "max_hold": 32,
+                        }
+                    },
+                },
+            },
+        ]
+        policy = build_adaptive_policy(results, min_context_trades=30)
         self.assertIn("trend|London", policy["routes"])
         self.assertNotIn("range|London", policy["routes"])
-        self.assertEqual(
-            policy["routes"]["trend|London"][0]["entry_model"],
-            "trend_pullback",
-        )
+        route = policy["routes"]["trend|London"][0]
+        self.assertEqual(route["entry_model"], "trend_pullback")
+        self.assertEqual(route["management_profile"]["name"], "protect_1_5r_0_2r")
+        self.assertIn("trend|London", policy["exit_profiles"])
 
     def test_policy_never_learns_from_final_holdout_rows(self):
         results = [{
@@ -152,6 +206,64 @@ class AdaptiveRouterTests(unittest.TestCase):
             },
         }
         self.assertEqual(execution_policy(base), execution_policy(changed_evidence))
+
+    def test_adaptive_signal_has_no_execution_fallback_without_evidence(self):
+        bars = _bars()
+        params = {
+            "regime_atr_short": 14,
+            "regime_atr_long": 50,
+            "regime_vol_ratio": 1.20,
+            "regime_trend_atr": 0.20,
+            "fast": 8,
+            "slow": 30,
+            "vwap_window": 60,
+            "_adaptive_research_mode": False,
+            "adaptive_policy": {"routes": {}, "exit_profiles": {}},
+        }
+        direction, model, context, exit_profile, meta = adaptive_signal(
+            params, bars, 100
+        )
+        self.assertEqual(direction, 0)
+        self.assertEqual(model, "none")
+        self.assertEqual(exit_profile, {})
+        self.assertEqual(meta["no_trade_reason"], "no_proven_route")
+
+    def test_conditioned_route_only_trades_when_condition_matches(self):
+        bars = _bars()
+        base = {
+            "regime_atr_short": 14,
+            "regime_atr_long": 50,
+            "regime_vol_ratio": 1.20,
+            "regime_trend_atr": 0.20,
+            "fast": 8,
+            "slow": 30,
+            "vwap_window": 60,
+        }
+        ctx = market_context(bars, 100, base)
+        params = {
+            **base,
+            "_adaptive_research_mode": False,
+            "adaptive_policy": {
+                "routes": {
+                    ctx["key"]: [{
+                        "entry_model": "momentum",
+                        "entry_params": {"fast": 3, "slow": 12, "entry_bps": 0.01},
+                        "conditions": {"volume_bucket": "impossible_bucket"},
+                    }]
+                },
+                "exit_profiles": {
+                    ctx["key"]: {
+                        "name": "test_exit",
+                        "stop_atr": 1.0,
+                        "target_r": 2.0,
+                        "max_hold": 20,
+                    }
+                },
+            },
+        }
+        direction, model, _, _, _ = adaptive_signal(params, bars, 100)
+        self.assertEqual(direction, 0)
+        self.assertEqual(model, "none")
 
     def test_adaptive_signal_uses_policy_for_current_context(self):
         bars = _bars()

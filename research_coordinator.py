@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from research_labs import ResearchLabs
+from research_store import RESEARCH_VALIDATION_VERSION
 from strategy_lab import Candidate, StrategyLab, candidate_signature
 
 log = logging.getLogger("microtrader.research_coordinator")
@@ -76,29 +77,30 @@ class ResearchCoordinator:
         self._task = None
 
     def _best_promising(self):
-        rows = [
-            r for r in self.lab.results()
-            if r.get("funnel_stage") in {"deep_search", "promoted", "incubator"}
-        ]
+        rows = []
+        for row in self.lab.results():
+            if row.get("funnel_stage") != "promoted" or not bool(row.get("promoted")):
+                continue
+            sig = candidate_signature(
+                Candidate(
+                    str(row.get("strategy") or ""),
+                    dict(row.get("params") or {}),
+                )
+            )
+            if sig in self._seen_validations:
+                continue
+            rows.append(row)
         if not rows:
             return None
-
-        # Deep Search and Promoted deserve full validation first. Incubator is
-        # validated only if the funnel score is unusually strong.
-        stage_rank = {"promoted": 3, "deep_search": 2, "incubator": 1}
         rows.sort(
             key=lambda r: (
-                stage_rank.get(r.get("funnel_stage"), 0),
                 float(r.get("funnel_score") or 0),
                 float((r.get("oos") or {}).get("profit_factor") or 0),
                 float((r.get("oos") or {}).get("expectancy_bps") or 0),
             ),
             reverse=True,
         )
-        top = rows[0]
-        if top.get("funnel_stage") == "incubator" and float(top.get("funnel_score") or 0) < 70:
-            return None
-        return top
+        return rows[0]
 
     async def _run_validation(self, row: dict, sig: str):
         self.state.mode = "validation"
@@ -132,10 +134,13 @@ class ResearchCoordinator:
             if self.research.state.last_error:
                 raise RuntimeError(self.research.state.last_error)
 
+            master = (self.research.public_state().get("labs") or {}).get("master") or {}
             summary = {
-                "completed_labs": self.research.state.completed_labs,
-                "total_labs": self.research.state.total_labs,
-                "master": (self.research.public_state().get("labs") or {}).get("master"),
+                "validation_version": RESEARCH_VALIDATION_VERSION,
+                "passed": bool(master.get("passed")),
+                "completed_checks": self.research.state.completed_labs,
+                "total_checks": self.research.state.total_labs,
+                "master": master,
             }
             await self.research.store.save_validation(
                 candidate_signature=sig,
@@ -148,10 +153,15 @@ class ResearchCoordinator:
             self.state.validations_completed = len(self._seen_validations)
             self.state.last_validation_signature = sig
             self.state.last_validation_at = datetime.now(timezone.utc).isoformat()
-            self.state.message = "Validation completed; forex discovery resumed."
+            self.state.message = (
+                "Validation passed; paper eligibility unlocked."
+                if summary["passed"]
+                else "Validation rejected; discovery resumed."
+            )
             log.info(
-                "Coordinator validation complete: strategy=%s signature=%s",
+                "Coordinator validation complete: strategy=%s passed=%s signature=%s",
                 self.state.queued_strategy,
+                summary["passed"],
                 sig[:12],
             )
         except Exception as exc:
@@ -194,7 +204,7 @@ class ResearchCoordinator:
                         await self._run_validation(row, sig)
                     else:
                         self.state.mode = "discovery"
-                        self.state.message = "Discovery active; strongest promising candidate already validated."
+                        self.state.message = "Discovery active; waiting for the next unvalidated promoted candidate."
                 else:
                     self.state.mode = "discovery"
                     self.state.message = "Discovery active; waiting for a candidate strong enough for validation."
