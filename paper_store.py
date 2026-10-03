@@ -454,7 +454,7 @@ class PaperTradingStore:
                     entry_model, entry_regime, entry_context, exit_model,
                     route_evidence_score, management_model,
                     max_favorable_r, max_adverse_r, giveback_r
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     paper_id, pair, side, entry_time, exit_time,
