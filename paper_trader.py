@@ -493,7 +493,7 @@ class PaperTradingEngine:
             "hard >=3/day per strategy; preference 5-10/day; "
             "portfolio target >=10/day combined"
         )
-        payload["paper_sources"] = ["forex_promoted", "research_promoted_17of17_validated"]
+        payload["paper_sources"] = ["forex_promoted", "research_final_validation_promoted"]
         payload["adaptive_context_version"] = ADAPTIVE_CONTEXT_VERSION
         return payload
 
@@ -533,7 +533,7 @@ class PaperTradingEngine:
             min_trades_per_day=self.settings.strategy_min_trades_per_day,
             evaluation_policy_version=FOREX_EVALUATION_POLICY_VERSION,
         )
-        research_validated = await self.validation_store.load_paper_eligible_validations(
+        research_promoted = await self.validation_store.load_paper_eligible_promotions(
             research_policy_version=RESEARCH_POLICY_VERSION,
             min_trades_per_day=self.settings.strategy_min_trades_per_day,
             limit=100,
@@ -583,9 +583,9 @@ class PaperTradingEngine:
                     start_balance=float(self.settings.paper_start_balance),
                 )
 
-        # Research candidates enter Paper only after BOTH Research promotion
-        # and a completed exact 17/17 validation under the current policy.
-        for row in research_validated:
+        # Research candidates enter Paper only after the exact frozen
+        # configuration passes the final Strategy Lab validation gate.
+        for row in research_promoted:
             strategy = str(row.get("strategy") or "")
             if strategy not in self.SUPPORTED:
                 continue
@@ -621,7 +621,7 @@ class PaperTradingEngine:
                 )
             await self.store.ensure_strategy(
                 paper_id=paper_id,
-                promoted_run_id="research-validation:" + str(row.get("candidate_signature") or ""),
+                promoted_run_id="research-promoted:" + str(row.get("candidate_signature") or ""),
                 strategy=strategy,
                 params=params,
                 pairs=list(self.settings.forex_pairs),
@@ -686,10 +686,10 @@ class PaperTradingEngine:
             >= float(self.settings.portfolio_min_trades_per_day)
         )
         log.info(
-            "Paper discovery: forex_promoted=%s research_validated=%s active=%s "
+            "Paper discovery: forex_promoted=%s research_promoted=%s active=%s "
             "combined_expected_tpd=%.2f hard_per_strategy=%.1f portfolio_target=%.1f",
             len(forex_promoted),
-            len(research_validated),
+            len(research_promoted),
             len(active),
             expected_portfolio_trades_per_day,
             float(self.settings.strategy_min_trades_per_day),
