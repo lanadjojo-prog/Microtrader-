@@ -1,6 +1,7 @@
 import unittest
 
 from adaptive_router import (
+    ADAPTIVE_CONTEXT_VERSION,
     adaptive_signal,
     build_adaptive_policy,
     execution_policy,
@@ -57,6 +58,7 @@ class AdaptiveRouterTests(unittest.TestCase):
                 "params": {"fast": 8, "slow": 30, "pullback_z": 1.0},
                 "funnel_score": 62.0,
                 "adaptive_diagnostics": {
+                    "context_version": ADAPTIVE_CONTEXT_VERSION,
                     "context_entry_breakdown": {
                         "trend|London||trend_pullback": {
                             "trades": 40,
@@ -107,6 +109,7 @@ class AdaptiveRouterTests(unittest.TestCase):
                 "params": {"_phase": "discovery"},
                 "funnel_score": 55.0,
                 "adaptive_diagnostics": {
+                    "context_version": ADAPTIVE_CONTEXT_VERSION,
                     "context_entry_breakdown": {},
                     "stress_context_entry_breakdown": {},
                     "context_exit_breakdown": {
@@ -224,6 +227,43 @@ class AdaptiveRouterTests(unittest.TestCase):
         self.assertEqual(model, "none")
         self.assertEqual(exit_profile, {})
         self.assertEqual(meta["no_trade_reason"], "no_proven_route")
+
+    def test_conditioned_route_only_trades_when_condition_matches(self):
+        bars = _bars()
+        base = {
+            "regime_atr_short": 14,
+            "regime_atr_long": 50,
+            "regime_vol_ratio": 1.20,
+            "regime_trend_atr": 0.20,
+            "fast": 8,
+            "slow": 30,
+            "vwap_window": 60,
+        }
+        ctx = market_context(bars, 100, base)
+        params = {
+            **base,
+            "_adaptive_research_mode": False,
+            "adaptive_policy": {
+                "routes": {
+                    ctx["key"]: [{
+                        "entry_model": "momentum",
+                        "entry_params": {"fast": 3, "slow": 12, "entry_bps": 0.01},
+                        "conditions": {"volume_bucket": "impossible_bucket"},
+                    }]
+                },
+                "exit_profiles": {
+                    ctx["key"]: {
+                        "name": "test_exit",
+                        "stop_atr": 1.0,
+                        "target_r": 2.0,
+                        "max_hold": 20,
+                    }
+                },
+            },
+        }
+        direction, model, _, _, _ = adaptive_signal(params, bars, 100)
+        self.assertEqual(direction, 0)
+        self.assertEqual(model, "none")
 
     def test_adaptive_signal_uses_policy_for_current_context(self):
         bars = _bars()
