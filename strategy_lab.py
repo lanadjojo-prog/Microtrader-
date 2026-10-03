@@ -1187,6 +1187,7 @@ def _annotate_trade_context(
     candidate: Candidate,
     trades: List[dict],
     bars: List[dict],
+    cost_bps: float = 0.0,
 ) -> None:
     if not trades or not bars:
         return
@@ -1208,7 +1209,7 @@ def _annotate_trade_context(
         trade["volatility_bucket"] = str(context.get("volatility") or "unknown")
         trade["trend_direction"] = str(context.get("trend_direction") or "unknown")
         lifecycle = _trade_lifecycle(
-            trade, bars, idx, exit_idx, float(candidate.params.get("_cost_bps", 0.0) or 0.0)
+            trade, bars, idx, exit_idx, float(cost_bps)
         )
         trade.update(lifecycle)
 
@@ -1251,16 +1252,14 @@ def evaluate_candidate(
         test = bars[split:]
         train_days.update(str(x.get("t") or "")[:10] for x in train if x.get("t"))
         oos_days.update(str(x.get("t") or "")[:10] for x in test if x.get("t"))
-
-        candidate.params["_cost_bps"] = float(cost_bps)
         symbol_train = simulate(candidate, symbol, train, cost_bps)
         symbol_oos = simulate(candidate, symbol, test, cost_bps)
-        candidate.params["_cost_bps"] = float(cost_bps * stress_cost_multiplier)
         symbol_stress = simulate(candidate, symbol, test, cost_bps * stress_cost_multiplier)
-        candidate.params["_cost_bps"] = float(cost_bps)
-        _annotate_trade_context(candidate, symbol_train, train)
-        _annotate_trade_context(candidate, symbol_oos, test)
-        _annotate_trade_context(candidate, symbol_stress, test)
+        _annotate_trade_context(candidate, symbol_train, train, cost_bps)
+        _annotate_trade_context(candidate, symbol_oos, test, cost_bps)
+        _annotate_trade_context(
+            candidate, symbol_stress, test, cost_bps * stress_cost_multiplier
+        )
         train_trades.extend(symbol_train)
         oos_trades.extend(symbol_oos)
         stress_oos_trades.extend(symbol_stress)
