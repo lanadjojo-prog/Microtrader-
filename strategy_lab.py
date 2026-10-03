@@ -2161,7 +2161,9 @@ def _simulate_asymmetric_breakout(candidate: Candidate, symbol: str, bars: List[
                 exit_price=target; x=j; r_mult=target_r; break
         if r_mult is None:
             r_mult=direction*(exit_price-entry)/risk if risk>0 else 0.0
-        trades.append(_trade(symbol,bars[e],bars[x],entry,exit_price,cost_bps,r_mult,direction=direction)); i=x+1
+        trade=_trade(symbol,bars[e],bars[x],entry,exit_price,cost_bps,r_mult,direction=direction)
+        trade["risk_distance"]=risk
+        trades.append(trade); i=x+1
     return trades
 
 def _trade(
