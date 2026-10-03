@@ -493,7 +493,7 @@ class PaperTradingEngine:
             "hard >=3/day per strategy; preference 5-10/day; "
             "portfolio target >=10/day combined"
         )
-        payload["paper_sources"] = ["forex_promoted", "research_robust_validation_passed"]
+        payload["paper_sources"] = ["research_robust_validation_passed"]
         payload["adaptive_context_version"] = ADAPTIVE_CONTEXT_VERSION
         return payload
 
@@ -528,11 +528,6 @@ class PaperTradingEngine:
         }
 
     async def _discover(self) -> List[dict]:
-        forex_promoted = await self.research_store.load_promoted(
-            limit=100,
-            min_trades_per_day=self.settings.strategy_min_trades_per_day,
-            evaluation_policy_version=FOREX_EVALUATION_POLICY_VERSION,
-        )
         research_validated = await self.validation_store.load_paper_eligible_validations(
             research_policy_version=RESEARCH_POLICY_VERSION,
             min_trades_per_day=self.settings.strategy_min_trades_per_day,
@@ -542,46 +537,6 @@ class PaperTradingEngine:
         eligible_ids: set[str] = set()
         portfolio_sources: set[str] = set()
         expected_portfolio_trades_per_day = 0.0
-
-        # Native Forex Lab promotions.
-        for row in forex_promoted:
-            strategy = str(row.get("strategy") or "")
-            if strategy not in self.SUPPORTED:
-                continue
-            base_tf = int(
-                row.get("timeframe_min")
-                or (row.get("params") or {}).get("timeframe_min")
-                or 0
-            )
-            if base_tf not in (1, 5):
-                continue
-            base_params = {
-                k: v for k, v in dict(row.get("params") or {}).items()
-                if k != "_phase"
-            }
-            base_params["_paper_source"] = "forex"
-            base_params["risk_eur"] = float(self.settings.paper_risk_eur)
-            source_key = _paper_id({**row, "params": base_params})
-            if source_key not in portfolio_sources:
-                portfolio_sources.add(source_key)
-                expected_portfolio_trades_per_day += float(
-                    (row.get("oos") or {}).get("avg_trades_per_day") or 0.0
-                )
-
-            variants = [base_params]
-            for params in variants:
-                variant_row = {**row, "params": params}
-                paper_id = _paper_id(variant_row)
-                eligible_ids.add(paper_id)
-                await self.store.ensure_strategy(
-                    paper_id=paper_id,
-                    promoted_run_id=str(row.get("run_id") or ""),
-                    strategy=strategy,
-                    params=params,
-                    pairs=list(row.get("pairs") or self.settings.forex_pairs),
-                    timeframe_min=base_tf,
-                    start_balance=float(self.settings.paper_start_balance),
-                )
 
         # Research candidates enter Paper only after the exact frozen
         # configuration passes the single robust Validation gate.
@@ -686,9 +641,8 @@ class PaperTradingEngine:
             >= float(self.settings.portfolio_min_trades_per_day)
         )
         log.info(
-            "Paper discovery: forex_promoted=%s research_validated=%s active=%s "
+            "Paper discovery: research_validated=%s active=%s "
             "combined_expected_tpd=%.2f hard_per_strategy=%.1f portfolio_target=%.1f",
-            len(forex_promoted),
             len(research_validated),
             len(active),
             expected_portfolio_trades_per_day,
