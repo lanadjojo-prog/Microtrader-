@@ -254,6 +254,7 @@ class StrategyLab:
                 and str((row.get("params") or {}).get("data_source") or "") == "ctrader"
                 and str((row.get("params") or {}).get("direction_mode") or "") == "long_short"
                 and str((row.get("params") or {}).get("_policy_version") or "") == RESEARCH_POLICY_VERSION
+                and str((row.get("adaptive_diagnostics") or {}).get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
             ]
             persisted_signatures = await self.store.load_signatures()
             persisted_state = await self.store.load_state()
@@ -268,7 +269,7 @@ class StrategyLab:
                 int(persisted_state.get("tested_total", len(seen))),
                 len(seen),
             )
-            self.state.promoted_total = int(persisted_state.get("promoted_total", len(promoted)))
+            self.state.promoted_total = len(promoted)
             self._results = list(results)
             log.info(
                 "Strategy Lab resume: loaded_results=%s loaded_signatures=%s generation=%s tested_total=%s promoted_total=%s",
