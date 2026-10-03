@@ -107,8 +107,12 @@ async def autostart():
     if settings.lab_auto_start: await strategy_lab.start()
     if settings.research_agent_auto_start: await research_agent.start()
     if settings.research_auto_start: await research_coordinator.start()
-    if settings.forex_lab_auto_start: await forex_lab.start()
-    if settings.precision_lab_auto_start: await precision_lab.start()
+    # Legacy Forex/Precision labs are retained for audit endpoints only.
+    # The active research path is now StrategyLab → Distillation → Validation → Paper.
+    if forex_lab.state.running:
+        await forex_lab.stop()
+    if precision_lab.state.running:
+        await precision_lab.stop()
     if settings.paper_trading_auto_start: await paper_engine.start()
     logging.getLogger("microtrader").info(
         "WORKERS research=%s agent=%s coordinator=%s forex=%s precision=%s paper=%s "
