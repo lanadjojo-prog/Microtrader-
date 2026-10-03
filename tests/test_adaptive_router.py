@@ -52,99 +52,106 @@ class AdaptiveRouterTests(unittest.TestCase):
         self.assertIn(before["regime"], {"expansion", "trend", "range"})
 
     def test_policy_uses_positive_context_specialists_only(self):
-        results = [
-            {
-                "strategy": "trend_pullback",
-                "params": {"fast": 8, "slow": 30, "pullback_z": 1.0},
-                "funnel_score": 62.0,
-                "adaptive_diagnostics": {
-                    "context_version": ADAPTIVE_CONTEXT_VERSION,
-                    "context_entry_breakdown": {
-                        "trend|London||trend_pullback": {
-                            "trades": 40,
-                            "expectancy_bps": 4.5,
-                            "profit_factor": 1.4,
-                            "max_loss_streak": 3,
-                        },
-                        "range|London||trend_pullback": {
-                            "trades": 40,
-                            "expectancy_bps": -2.0,
-                            "profit_factor": 0.8,
-                            "max_loss_streak": 5,
-                        },
+        results = [{
+            "strategy": "trend_pullback",
+            "params": {
+                "_phase": "discovery",
+                "fast": 8,
+                "slow": 30,
+                "pullback_z": 1.0,
+            },
+            "funnel_score": 62.0,
+            "adaptive_diagnostics": {
+                "context_version": ADAPTIVE_CONTEXT_VERSION,
+                "context_entry_breakdown": {
+                    "trend|London||trend_pullback": {
+                        "trades": 40,
+                        "expectancy_bps": 4.5,
+                        "profit_factor": 1.4,
+                        "max_loss_streak": 3,
                     },
-                    "stress_context_entry_breakdown": {
-                        "trend|London||trend_pullback": {
-                            "trades": 20,
-                            "expectancy_bps": 1.2,
-                            "profit_factor": 1.15,
-                        }
-                    },
-                    "context_entry_management_breakdown": {
-                        "trend|London||trend_pullback||protect_1_5r_0_2r": {
-                            "trades": 40,
-                            "expectancy_bps": 4.8,
-                            "profit_factor": 1.45,
-                            "max_loss_streak": 3,
-                        }
-                    },
-                    "stress_context_entry_management_breakdown": {
-                        "trend|London||trend_pullback||protect_1_5r_0_2r": {
-                            "trades": 20,
-                            "expectancy_bps": 1.1,
-                            "profit_factor": 1.12,
-                        }
-                    },
-                    "management_profiles": {
-                        "protect_1_5r_0_2r": {
-                            "name": "protect_1_5r_0_2r",
-                            "management_trigger_r": 1.5,
-                            "management_lock_net_r": 0.2,
-                        }
+                    "range|London||trend_pullback": {
+                        "trades": 40,
+                        "expectancy_bps": -2.0,
+                        "profit_factor": 0.8,
+                        "max_loss_streak": 5,
                     },
                 },
-            },
-            {
-                "strategy": "adaptive_router",
-                "params": {"_phase": "discovery", "_adaptive_research_mode": True},
-                "funnel_score": 55.0,
-                "adaptive_diagnostics": {
-                    "context_version": ADAPTIVE_CONTEXT_VERSION,
-                    "context_entry_breakdown": {},
-                    "stress_context_entry_breakdown": {},
-                    "context_exit_breakdown": {
-                        "trend|London||trend_atr_2_5r": {
-                            "trades": 40,
-                            "expectancy_bps": 3.0,
-                            "profit_factor": 1.3,
-                            "max_loss_streak": 3,
-                        }
+                "stress_context_entry_breakdown": {
+                    "trend|London||trend_pullback": {
+                        "trades": 20,
+                        "expectancy_bps": 1.2,
+                        "profit_factor": 1.15,
+                    }
+                },
+                "context_entry_management_breakdown": {
+                    "trend|London||trend_pullback||baseline": {
+                        "trades": 40,
+                        "expectancy_bps": 4.5,
+                        "profit_factor": 1.4,
                     },
-                    "stress_context_exit_breakdown": {
-                        "trend|London||trend_atr_2_5r": {
-                            "trades": 20,
-                            "expectancy_bps": 0.8,
-                            "profit_factor": 1.08,
-                        }
-                    },
-                    "exit_profiles": {
-                        "trend_atr_2_5r": {
-                            "name": "trend_atr_2_5r",
-                            "stop_atr": 1.0,
-                            "target_r": 2.5,
-                            "max_hold": 32,
-                        }
+                    "trend|London||trend_pullback||protect_1_5r_0_2r": {
+                        "trades": 40,
+                        "expectancy_bps": 5.0,
+                        "profit_factor": 1.45,
+                        "max_loss_streak": 3,
                     },
                 },
+                "stress_context_entry_management_breakdown": {
+                    "trend|London||trend_pullback||baseline": {
+                        "trades": 20,
+                        "expectancy_bps": 1.0,
+                        "profit_factor": 1.10,
+                    },
+                    "trend|London||trend_pullback||protect_1_5r_0_2r": {
+                        "trades": 20,
+                        "expectancy_bps": 1.2,
+                        "profit_factor": 1.12,
+                    },
+                },
+                "management_profiles": {
+                    "baseline": {"name": "baseline"},
+                    "protect_1_5r_0_2r": {
+                        "name": "protect_1_5r_0_2r",
+                        "management_trigger_r": 1.5,
+                        "management_lock_net_r": 0.2,
+                    },
+                },
+                "context_entry_exit_breakdown": {
+                    "trend|London||trend_pullback||balanced_2_5r": {
+                        "trades": 40,
+                        "expectancy_bps": 4.2,
+                        "profit_factor": 1.35,
+                        "max_loss_streak": 3,
+                    }
+                },
+                "stress_context_entry_exit_breakdown": {
+                    "trend|London||trend_pullback||balanced_2_5r": {
+                        "trades": 20,
+                        "expectancy_bps": 1.0,
+                        "profit_factor": 1.08,
+                    }
+                },
+                "exit_profiles": {
+                    "balanced_2_5r": {
+                        "name": "balanced_2_5r",
+                        "stop_atr": 1.0,
+                        "target_r": 2.5,
+                        "max_hold": 32,
+                    }
+                },
             },
-        ]
+        }]
         policy = build_adaptive_policy(results, min_context_trades=30)
         self.assertIn("trend|London", policy["routes"])
         self.assertNotIn("range|London", policy["routes"])
         route = policy["routes"]["trend|London"][0]
         self.assertEqual(route["entry_model"], "trend_pullback")
-        self.assertEqual(route["management_profile"]["name"], "protect_1_5r_0_2r")
-        self.assertIn("trend|London", policy["exit_profiles"])
+        self.assertEqual(
+            route["management_profile"]["name"],
+            "protect_1_5r_0_2r",
+        )
+        self.assertEqual(route["exit_profile"]["name"], "balanced_2_5r")
 
     def test_policy_never_learns_from_final_holdout_rows(self):
         results = [{
@@ -240,6 +247,29 @@ class AdaptiveRouterTests(unittest.TestCase):
                     "profit_factor": 1.10,
                 }
             },
+            "context_entry_exit_breakdown": {
+                "trend|London||momentum||balanced_2_5r": {
+                    "trades": 80,
+                    "expectancy_bps": 2.0,
+                    "profit_factor": 1.25,
+                    "max_loss_streak": 3,
+                }
+            },
+            "stress_context_entry_exit_breakdown": {
+                "trend|London||momentum||balanced_2_5r": {
+                    "trades": 40,
+                    "expectancy_bps": 0.5,
+                    "profit_factor": 1.05,
+                }
+            },
+            "exit_profiles": {
+                "balanced_2_5r": {
+                    "name": "balanced_2_5r",
+                    "stop_atr": 1.0,
+                    "target_r": 2.5,
+                    "max_hold": 32,
+                }
+            },
         }
         entry_row = {
             "strategy": "momentum",
@@ -252,44 +282,8 @@ class AdaptiveRouterTests(unittest.TestCase):
             "funnel_score": 55.0,
             "adaptive_diagnostics": base_diag,
         }
-        exit_row = {
-            "strategy": "adaptive_router",
-            "params": {
-                "_phase": "discovery",
-                "_adaptive_research_mode": True,
-            },
-            "funnel_score": 55.0,
-            "adaptive_diagnostics": {
-                "context_version": ADAPTIVE_CONTEXT_VERSION,
-                "context_entry_breakdown": {},
-                "stress_context_entry_breakdown": {},
-                "context_exit_breakdown": {
-                    "trend|London||trend_atr_2_5r": {
-                        "trades": 40,
-                        "expectancy_bps": 2.0,
-                        "profit_factor": 1.25,
-                        "max_loss_streak": 3,
-                    }
-                },
-                "stress_context_exit_breakdown": {
-                    "trend|London||trend_atr_2_5r": {
-                        "trades": 20,
-                        "expectancy_bps": 0.5,
-                        "profit_factor": 1.05,
-                    }
-                },
-                "exit_profiles": {
-                    "trend_atr_2_5r": {
-                        "name": "trend_atr_2_5r",
-                        "stop_atr": 1.0,
-                        "target_r": 2.5,
-                        "max_hold": 32,
-                    }
-                },
-            },
-        }
         policy = build_adaptive_policy(
-            [entry_row, exit_row],
+            [entry_row],
             min_context_trades=30,
             max_entries_per_context=2,
         )
@@ -299,6 +293,7 @@ class AdaptiveRouterTests(unittest.TestCase):
             route["conditions"],
             {"time_bucket": "london_open"},
         )
+        self.assertEqual(route["exit_profile"]["name"], "balanced_2_5r")
         self.assertLessEqual(len(route["conditions"]), 1)
 
     def test_old_context_version_cannot_feed_router(self):
@@ -400,15 +395,13 @@ class AdaptiveRouterTests(unittest.TestCase):
                         "entry_params": {"fast": 3, "slow": 12, "entry_bps": 0.01},
                         "evidence_score": 12.3,
                         "source_trades": 20,
+                        "exit_profile": {
+                            "name": "test_exit",
+                            "stop_atr": 1.0,
+                            "target_r": 2.0,
+                            "max_hold": 20,
+                        },
                     }]
-                },
-                "exit_profiles": {
-                    ctx["key"]: {
-                        "name": "test_exit",
-                        "stop_atr": 1.0,
-                        "target_r": 2.0,
-                        "max_hold": 20,
-                    }
                 },
             },
         }
