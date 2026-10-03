@@ -1,7 +1,10 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from adaptive_router import ADAPTIVE_CONTEXT_VERSION
 from strategy_lab import (
+    ADAPTIVE_CONTEXT_VERSION as LAB_CONTEXT_VERSION,
+    RESEARCH_POLICY_VERSION,
     Candidate,
     aggregate_bars,
     candidate_signature,
@@ -10,6 +13,7 @@ from strategy_lab import (
     evaluate_candidate,
     metrics,
     simulate,
+    _context_backfill_candidates,
     _regime_ensemble_signal,
 )
 
@@ -112,6 +116,91 @@ class ResearchStabilityTests(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertIn(a[1], {"trend_pullback", "breakout", "vwap_reversion", "none"})
         self.assertIn(a[2], {"trend", "expansion", "range", "warmup", "invalid"})
+
+    def test_stale_context_evidence_is_backfilled_even_if_signature_seen(self):
+        params = {
+            "timeframe_min": 1,
+            "_phase": "discovery",
+            "_policy_version": RESEARCH_POLICY_VERSION,
+            "market": "forex",
+            "data_source": "ctrader",
+            "direction_mode": "long_short",
+            "entry_sessions": "london_new_york",
+            "min_volume_ratio": 0.70,
+            "volume_window": 50,
+            "fast": 4,
+            "slow": 16,
+            "entry_bps": 8.0,
+        }
+        candidate = Candidate("momentum", dict(params))
+        sig = candidate_signature(candidate)
+        stale = {
+            "strategy": "momentum",
+            "params": dict(params),
+            "funnel_score": 72.0,
+            "oos": {"trades": 120},
+            "adaptive_diagnostics": {
+                "context_version": "adaptive-context-v1",
+                "context_entry_breakdown": {"trend|London||momentum": {"trades": 40}},
+            },
+        }
+        out = _context_backfill_candidates([stale], {sig})
+        self.assertEqual(len(out), 1)
+        self.assertEqual(candidate_signature(out[0]), sig)
+
+    def test_current_context_evidence_is_not_backfilled_again(self):
+        params = {
+            "timeframe_min": 1,
+            "_phase": "discovery",
+            "_policy_version": RESEARCH_POLICY_VERSION,
+            "market": "forex",
+            "data_source": "ctrader",
+            "direction_mode": "long_short",
+            "entry_sessions": "london_new_york",
+            "min_volume_ratio": 0.70,
+            "volume_window": 50,
+            "fast": 4,
+            "slow": 16,
+            "entry_bps": 8.0,
+        }
+        fresh = {
+            "strategy": "momentum",
+            "params": dict(params),
+            "funnel_score": 72.0,
+            "oos": {"trades": 120},
+            "adaptive_diagnostics": {
+                "context_version": ADAPTIVE_CONTEXT_VERSION,
+                "context_entry_breakdown": {"trend|London||momentum": {"trades": 40}},
+                "context_entry_management_breakdown": {
+                    "trend|London||momentum||baseline": {"trades": 40}
+                },
+            },
+        }
+        out = _context_backfill_candidates([fresh], set())
+        self.assertEqual(out, [])
+        self.assertEqual(LAB_CONTEXT_VERSION, ADAPTIVE_CONTEXT_VERSION)
+
+    def test_old_adaptive_router_is_never_reused_for_backfill(self):
+        params = {
+            "timeframe_min": 1,
+            "_phase": "discovery",
+            "_policy_version": RESEARCH_POLICY_VERSION,
+            "market": "forex",
+            "data_source": "ctrader",
+            "direction_mode": "long_short",
+            "entry_sessions": "london_new_york",
+        }
+        old_router = {
+            "strategy": "adaptive_router",
+            "params": params,
+            "funnel_score": 99.0,
+            "oos": {"trades": 500},
+            "adaptive_diagnostics": {"context_version": "adaptive-context-v1"},
+        }
+        self.assertEqual(
+            _context_backfill_candidates([old_router], set()),
+            [],
+        )
 
     def test_deep_search_freezes_incubator_parameters(self):
         seen = {candidate_signature(c) for c in discovery_candidates()}
