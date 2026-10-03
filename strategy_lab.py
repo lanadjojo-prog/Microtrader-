@@ -1106,7 +1106,9 @@ def _trade_lifecycle(
     """
     entry = float(trade.get("entry_price") or 0.0)
     direction = int(trade.get("direction") or 0)
-    risk_distance = _atr(bars, entry_idx, 14)
+    risk_distance = float(trade.get("risk_distance") or 0.0) or _atr(
+        bars, entry_idx, 14
+    )
     if entry <= 0 or direction not in (-1, 1) or risk_distance <= 0:
         return {
             "mfe_r": 0.0,
@@ -1118,11 +1120,18 @@ def _trade_lifecycle(
 
     risk_pct = risk_distance / entry
     roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
-    baseline_net_r = float(trade.get("net_return") or 0.0) / risk_pct if risk_pct > 0 else 0.0
+    baseline_net_r = (
+        float(trade.get("net_return") or 0.0) / risk_pct
+        if risk_pct > 0 else 0.0
+    )
+    last_idx = min(exit_idx, len(bars) - 1)
+    exit_price = float(trade.get("exit_price") or entry)
 
     mfe_r = 0.0
     mae_r = 0.0
-    for j in range(entry_idx, min(exit_idx, len(bars) - 1) + 1):
+    # Full OHLC ranges are only observable while the position survives the bar.
+    # On the actual exit bar use only the exit price, never later candle range.
+    for j in range(entry_idx, last_idx):
         hi = float(bars[j]["h"])
         lo = float(bars[j]["l"])
         favorable = (
@@ -1135,6 +1144,10 @@ def _trade_lifecycle(
         )
         mfe_r = max(mfe_r, favorable)
         mae_r = max(mae_r, adverse)
+
+    exit_move_r = direction * (exit_price - entry) / risk_distance
+    mfe_r = max(mfe_r, exit_move_r)
+    mae_r = max(mae_r, -exit_move_r)
 
     outcomes = {}
     for name, profile in MANAGEMENT_PROFILES.items():
@@ -1149,9 +1162,11 @@ def _trade_lifecycle(
         lock_net_r = float(profile["management_lock_net_r"])
         triggered = False
         managed_net_r = baseline_net_r
-        for j in range(entry_idx, min(exit_idx, len(bars) - 1) + 1):
+        for j in range(entry_idx, last_idx + 1):
             hi = float(bars[j]["h"])
             lo = float(bars[j]["l"])
+
+            # A protection level earned on an earlier bar is active now.
             if triggered:
                 lock_gross_return = lock_net_r * risk_pct + roundtrip_cost_pct
                 lock_price = entry * (
@@ -1161,6 +1176,10 @@ def _trade_lifecycle(
                 if lock_hit:
                     managed_net_r = lock_net_r
                     break
+
+            # Do not create a trigger from movement after the actual exit.
+            if j >= last_idx:
+                break
 
             favorable = (
                 (hi - entry) / risk_distance
@@ -1959,6 +1978,7 @@ def _simulate_regime_ensemble(
             symbol, bars[e], bars[x], entry, exit_price, cost_bps,
             r_mult, direction=direction,
         )
+        trade["risk_distance"] = risk
         trade["entry_model"] = entry_model
         trade["entry_regime"] = regime
         trade["exit_reason"] = exit_reason
@@ -2062,6 +2082,7 @@ def _simulate_adaptive_router(
             symbol, bars[e], bars[x], entry, exit_price, cost_bps,
             r_mult, direction=direction,
         )
+        trade["risk_distance"] = risk
         trade["entry_model"] = entry_model
         trade["entry_regime"] = str(context.get("regime") or "unknown")
         trade["entry_context"] = context
