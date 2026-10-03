@@ -503,7 +503,7 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
-RESEARCH_POLICY_VERSION = "forex-ctrader-v5-streak-gate-holdout20-oos20"
+RESEARCH_POLICY_VERSION = "forex-ctrader-v6-distilled-management-holdout20-oos20"
 FINAL_HOLDOUT_FRACTION = 0.20
 DISCOVERY_SOURCE_BARS = 10000
 INCUBATOR_SOURCE_BARS = 20000
@@ -1717,7 +1717,7 @@ def evaluate_candidate(
             "router_passed": router_pass,
             "active_contexts": router_active_contexts,
             "positive_contexts": router_positive_contexts,
-            "exit_profiles": {
+            "observed_exit_profiles": {
                 str(t.get("exit_model")): dict(t.get("exit_profile") or {})
                 for t in oos_trades
                 if t.get("exit_model") and t.get("exit_profile")
