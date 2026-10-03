@@ -429,6 +429,21 @@ def _causal_close_entry(
             if exit_profile.get("max_hold") is not None else None
         ),
         "route_evidence_score": float(route_meta.get("evidence_score") or 0.0),
+        "management_model": str(
+            (route_meta.get("management_profile") or {}).get("name") or "baseline"
+        ),
+        "management_trigger_r_override": (
+            float((route_meta.get("management_profile") or {}).get("management_trigger_r"))
+            if (route_meta.get("management_profile") or {}).get("management_trigger_r") is not None
+            else None
+        ),
+        "management_lock_net_r_override": (
+            float((route_meta.get("management_profile") or {}).get("management_lock_net_r"))
+            if (route_meta.get("management_profile") or {}).get("management_lock_net_r") is not None
+            else None
+        ),
+        "max_favorable_r": 0.0,
+        "max_adverse_r": 0.0,
     }
 
 
@@ -842,9 +857,38 @@ class PaperTradingEngine:
         if not allow_entries and not positions and strategy_status == "retiring":
             await self.store.set_status(paper_id, "frequency_rejected")
 
+    def _update_position_lifecycle(self, pos: dict, bar: dict) -> None:
+        entry = float(pos.get("entry_price") or 0.0)
+        risk = float(pos.get("risk_distance") or 0.0)
+        direction = int(pos.get("direction") or 0)
+        if entry <= 0 or risk <= 0 or direction not in (-1, 1):
+            return
+        hi, lo = float(bar["h"]), float(bar["l"])
+        favorable = (
+            (hi - entry) / risk if direction > 0 else (entry - lo) / risk
+        )
+        adverse = (
+            (entry - lo) / risk if direction > 0 else (hi - entry) / risk
+        )
+        pos["max_favorable_r"] = max(
+            float(pos.get("max_favorable_r") or 0.0), favorable
+        )
+        pos["max_adverse_r"] = max(
+            float(pos.get("max_adverse_r") or 0.0), adverse
+        )
+
     def _maybe_protect_stop(self, pos: dict, bar: dict, params: dict) -> bool:
+        effective_params = dict(params)
+        if pos.get("management_trigger_r_override") is not None:
+            effective_params["management_trigger_r"] = float(
+                pos["management_trigger_r_override"]
+            )
+        if pos.get("management_lock_net_r_override") is not None:
+            effective_params["management_lock_net_r"] = float(
+                pos["management_lock_net_r_override"]
+            )
         trigger_r, lock_r = _exit_management(
-            params,
+            effective_params,
             entry=float(pos["entry_price"]),
             risk_distance=float(pos["risk_distance"]),
             cost_bps=float(self.settings.forex_cost_bps),
@@ -880,6 +924,7 @@ class PaperTradingEngine:
     async def _manage_entry_bar(
         self, paper_id: str, pair: str, pos: dict, bar: dict, params: dict
     ) -> bool:
+        self._update_position_lifecycle(pos, bar)
         direction = int(pos["direction"])
         low, high = float(bar["l"]), float(bar["h"])
         stop, target = float(pos["stop_price"]), float(pos["target_price"])
@@ -911,6 +956,7 @@ class PaperTradingEngine:
         bars: List[dict],
         index: int,
     ) -> bool:
+        self._update_position_lifecycle(pos, bar)
         direction = int(pos["direction"])
         source = str(params.get("_paper_source") or "forex")
         low, high = float(bar["l"]), float(bar["h"])
@@ -1033,6 +1079,13 @@ class PaperTradingEngine:
             route_evidence_score=(
                 float(pos["route_evidence_score"])
                 if pos.get("route_evidence_score") is not None else None
+            ),
+            management_model=str(pos.get("management_model") or "baseline"),
+            max_favorable_r=float(pos.get("max_favorable_r") or 0.0),
+            max_adverse_r=float(pos.get("max_adverse_r") or 0.0),
+            giveback_r=max(
+                0.0,
+                float(pos.get("max_favorable_r") or 0.0) - float(r_multiple),
             ),
         )
         await self.store.delete_position(paper_id, pair)
