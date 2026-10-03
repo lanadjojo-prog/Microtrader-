@@ -504,62 +504,16 @@ def build_adaptive_policy(
                 and (stress_exp <= 0.0 or stress_pf < 1.0)
             ):
                 continue
-            distilled_filters: List[dict] = []
-            for diag_key, filter_name in (
-                ("entry_time_breakdown", "time_bucket"),
-                ("entry_volume_breakdown", "volume_bucket"),
-            ):
-                for filter_combo, filter_metrics in dict(diag.get(diag_key) or {}).items():
-                    parts = str(filter_combo).split("||")
-                    if len(parts) != 3:
-                        continue
-                    filter_ctx, filter_model, filter_value = parts
-                    if filter_ctx != ctx or filter_model != (model or source_strategy):
-                        continue
-                    filter_metrics = dict(filter_metrics or {})
-                    filter_trades = int(filter_metrics.get("trades") or 0)
-                    filter_exp = float(filter_metrics.get("expectancy_bps") or 0.0)
-                    filter_pf = float(filter_metrics.get("profit_factor") or 0.0)
-                    # Keep the final rule simple: at most one extra condition, and
-                    # only when it retains a meaningful sample and clearly improves
-                    # the base context/model evidence.
-                    if (
-                        filter_trades >= int(min_context_trades)
-                        and filter_trades >= max(1, int(trades * 0.35))
-                        and filter_exp >= exp + max(0.5, abs(exp) * 0.15)
-                        and filter_pf >= max(1.05, pf)
-                    ):
-                        distilled_filters.append({
-                            "name": filter_name,
-                            "value": filter_value,
-                            "trades": filter_trades,
-                            "expectancy_bps": filter_exp,
-                            "profit_factor": filter_pf,
-                        })
-            distilled_filters.sort(
-                key=lambda x: (
-                    float(x.get("expectancy_bps") or 0.0),
-                    float(x.get("profit_factor") or 0.0),
-                    int(x.get("trades") or 0),
-                ),
-                reverse=True,
-            )
-            chosen_filter = distilled_filters[0] if distilled_filters else None
             entry_candidates.setdefault(ctx, []).append({
                 "entry_model": model or source_strategy,
                 "entry_params": _entry_params_for_model(model or source_strategy, params),
-                "evidence_score": _evidence_score(met, stress, funnel)
-                    + (1.0 if chosen_filter else 0.0),
+                "evidence_score": _evidence_score(met, stress, funnel),
                 "source_strategy": source_strategy,
                 "source_trades": trades,
                 "source_expectancy_bps": round(exp, 4),
                 "source_profit_factor": round(pf, 4),
                 "stress_expectancy_bps": round(stress_exp, 4),
-                "filters": (
-                    {str(chosen_filter["name"]): str(chosen_filter["value"])}
-                    if chosen_filter else {}
-                ),
-                "filter_evidence": chosen_filter,
+                "conditions": {},
             })
 
         management_breakdown = dict(
@@ -669,11 +623,12 @@ def build_adaptive_policy(
             stress_exp = float(stress.get("expectancy_bps") or 0.0)
             stress_pf = float(stress.get("profit_factor") or 0.0)
             stress_trades = int(stress.get("trades") or 0)
-            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.02:
+            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.05:
                 continue
+            min_stress_trades = max(12, int(min_context_trades) // 2)
             if (
                 stress
-                and stress_trades >= int(min_context_trades)
+                and stress_trades >= min_stress_trades
                 and (stress_exp <= 0.0 or stress_pf < 1.0)
             ):
                 continue
