@@ -1287,6 +1287,19 @@ def evaluate_candidate(
             groups.setdefault(f"{left}||{right}", []).append(trade)
         return {label: metrics(group) for label, group in groups.items()}
 
+    def _triple_breakdown(
+        rows: List[dict], a: str, b: str, c: str
+    ) -> Dict[str, dict]:
+        groups: Dict[str, List[dict]] = {}
+        for trade in rows:
+            labels = [
+                str(trade.get(a) or "unknown"),
+                str(trade.get(b) or "unknown"),
+                str(trade.get(c) or "unknown"),
+            ]
+            groups.setdefault("||".join(labels), []).append(trade)
+        return {label: metrics(group) for label, group in groups.items()}
+
     def _management_breakdown(rows: List[dict]) -> tuple[Dict[str, dict], Dict[str, dict]]:
         by_combo: Dict[str, List[dict]] = {}
         by_profile: Dict[str, List[dict]] = {}
@@ -1314,8 +1327,12 @@ def evaluate_candidate(
     volume_breakdown = _breakdown(oos_trades, "volume_bucket")
     volatility_breakdown = _breakdown(oos_trades, "volatility_bucket")
     trend_direction_breakdown = _breakdown(oos_trades, "trend_direction")
-    context_entry_time_breakdown = _combo_breakdown(oos_trades, "entry_model", "time_bucket")
-    context_entry_volume_breakdown = _combo_breakdown(oos_trades, "entry_model", "volume_bucket")
+    context_entry_time_breakdown = _triple_breakdown(
+        oos_trades, "context_key", "entry_model", "time_bucket"
+    )
+    context_entry_volume_breakdown = _triple_breakdown(
+        oos_trades, "context_key", "entry_model", "volume_bucket"
+    )
     context_entry_management_breakdown, management_model_breakdown = _management_breakdown(oos_trades)
     stress_context_breakdown = _breakdown(stress_oos_trades, "context_key")
     stress_context_entry_breakdown = _combo_breakdown(
