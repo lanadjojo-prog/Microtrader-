@@ -254,7 +254,11 @@ class StrategyLab:
                 and str((row.get("params") or {}).get("data_source") or "") == "ctrader"
                 and str((row.get("params") or {}).get("direction_mode") or "") == "long_short"
                 and str((row.get("params") or {}).get("_policy_version") or "") == RESEARCH_POLICY_VERSION
-                and str((row.get("adaptive_diagnostics") or {}).get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
+                and (
+                    str(row.get("strategy") or "") != "adaptive_router"
+                    or str((row.get("adaptive_diagnostics") or {}).get("context_version") or "")
+                        == ADAPTIVE_CONTEXT_VERSION
+                )
             ]
             persisted_signatures = await self.store.load_signatures()
             persisted_state = await self.store.load_state()
@@ -693,12 +697,13 @@ def _context_backfill_candidates(
     results: List[dict],
     seen: set[str],
 ) -> List[Candidate]:
-    """Re-run historical configurations to recover context-level evidence.
+    """Re-label historical configurations with current causal diagnostics.
 
-    Old aggregate rows do not contain the per-trade context needed by the new
-    router. Re-evaluate the same trading parameters on the pre-holdout
-    discovery slice, including historically rejected configurations: a model
-    that is weak globally may still be a useful specialist in one regime.
+    Aggregate performance of non-adaptive strategies remains useful after a
+    context-schema upgrade. Their exact discovery signatures are deliberately
+    allowed to run again so the existing DB row is refreshed in-place with
+    time/volume/management diagnostics. Old adaptive-router results are not
+    reusable because routing semantics themselves changed.
     """
     rows = sorted(
         results,
@@ -708,6 +713,31 @@ def _context_backfill_candidates(
         ),
         reverse=True,
     )
+
+    # If any phase of a configuration has already been refreshed, do not let an
+    # older duplicate keep scheduling the same discovery backfill forever.
+    fresh_discovery_signatures: set[str] = set()
+    for row in rows:
+        strategy = str(row.get("strategy") or "")
+        if not strategy or strategy == "adaptive_router":
+            continue
+        diagnostics = dict(row.get("adaptive_diagnostics") or {})
+        if not (
+            diagnostics.get("context_entry_breakdown")
+            and diagnostics.get("context_entry_management_breakdown")
+            and str(diagnostics.get("context_version") or "")
+                == ADAPTIVE_CONTEXT_VERSION
+        ):
+            continue
+        params = dict(row.get("params") or {})
+        if not params:
+            continue
+        params["_phase"] = "discovery"
+        params["_policy_version"] = RESEARCH_POLICY_VERSION
+        fresh_discovery_signatures.add(
+            candidate_signature(Candidate(strategy, params))
+        )
+
     out: List[Candidate] = []
     local_seen: set[str] = set()
     for row in rows:
@@ -718,7 +748,8 @@ def _context_backfill_candidates(
         if (
             diagnostics.get("context_entry_breakdown")
             and diagnostics.get("context_entry_management_breakdown")
-            and str(diagnostics.get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
+            and str(diagnostics.get("context_version") or "")
+                == ADAPTIVE_CONTEXT_VERSION
         ):
             continue
         params = dict(row.get("params") or {})
@@ -726,12 +757,16 @@ def _context_backfill_candidates(
             continue
         if str(params.get("_policy_version") or "") != RESEARCH_POLICY_VERSION:
             continue
-        # Context backfill deliberately stays on pre-holdout discovery data.
+
+        # Backfill never touches the final holdout.
         params["_phase"] = "discovery"
         params["_policy_version"] = RESEARCH_POLICY_VERSION
         candidate = Candidate(strategy, params)
         signature = candidate_signature(candidate)
-        if signature in seen or signature in local_seen:
+
+        # 'seen' intentionally does not block a schema refresh. Persistence
+        # upserts the same signature rather than creating duplicate research.
+        if signature in fresh_discovery_signatures or signature in local_seen:
             continue
         local_seen.add(signature)
         out.append(candidate)
