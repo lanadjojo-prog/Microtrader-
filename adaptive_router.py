@@ -462,6 +462,7 @@ def build_adaptive_policy(
     entry_candidates: Dict[str, List[dict]] = {}
     exit_candidates: Dict[str, List[dict]] = {}
     management_candidates: Dict[tuple[str, str], List[dict]] = {}
+    base_entry_metrics: Dict[tuple[str, str], dict] = {}
     evidence_rows = 0
 
     for row in results:
@@ -504,9 +505,15 @@ def build_adaptive_policy(
                 and (stress_exp <= 0.0 or stress_pf < 1.0)
             ):
                 continue
+            resolved_model = model or source_strategy
+            base_entry_metrics[(ctx, resolved_model)] = {
+                "trades": trades,
+                "expectancy_bps": exp,
+                "profit_factor": pf,
+            }
             entry_candidates.setdefault(ctx, []).append({
-                "entry_model": model or source_strategy,
-                "entry_params": _entry_params_for_model(model or source_strategy, params),
+                "entry_model": resolved_model,
+                "entry_params": _entry_params_for_model(resolved_model, params),
                 "evidence_score": _evidence_score(met, stress, funnel),
                 "source_strategy": source_strategy,
                 "source_trades": trades,
@@ -516,13 +523,21 @@ def build_adaptive_policy(
                 "conditions": {},
             })
 
-        management_breakdown = dict(
-            diag.get("context_entry_management_breakdown") or {}
+        management_breakdown = (
+            {}
+            if source_strategy == "adaptive_router"
+            else dict(diag.get("context_entry_management_breakdown") or {})
         )
         stress_management = dict(
             diag.get("stress_context_entry_management_breakdown") or {}
         )
         management_profiles = dict(diag.get("management_profiles") or {})
+        baseline_management: Dict[tuple[str, str], dict] = {}
+        for combo, baseline_met in management_breakdown.items():
+            parts = str(combo).split("||")
+            if len(parts) == 3 and parts[2] == "baseline":
+                baseline_management[(parts[0], parts[1])] = dict(baseline_met or {})
+
         for combo, met in management_breakdown.items():
             parts = str(combo).split("||")
             if len(parts) != 3:
@@ -541,6 +556,21 @@ def build_adaptive_policy(
             stress_pf = float(stress.get("profit_factor") or 0.0)
             if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.05:
                 continue
+            complexity_penalty = 0.0
+            if management_name != "baseline":
+                baseline = dict(
+                    baseline_management.get((ctx, model)) or {}
+                )
+                base_exp = float(baseline.get("expectancy_bps") or 0.0)
+                base_pf = float(baseline.get("profit_factor") or 0.0)
+                required_gain = max(0.25, abs(base_exp) * 0.05)
+                if (
+                    not baseline
+                    or exp < base_exp + required_gain
+                    or pf < max(1.05, base_pf)
+                ):
+                    continue
+                complexity_penalty = 0.75
             min_stress_trades = max(12, int(min_context_trades) // 2)
             if (
                 stress
@@ -554,7 +584,7 @@ def build_adaptive_policy(
             )
             management_candidates.setdefault((ctx, model), []).append({
                 "profile": profile,
-                "score": _evidence_score(met, stress, funnel),
+                "score": _evidence_score(met, stress, funnel) - complexity_penalty,
                 "trades": trades,
             })
 
@@ -584,7 +614,20 @@ def build_adaptive_policy(
                 stress_trades = int(stress.get("trades") or 0)
                 stress_exp = float(stress.get("expectancy_bps") or 0.0)
                 stress_pf = float(stress.get("profit_factor") or 0.0)
-                if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.08:
+                resolved_model = model or source_strategy
+                base = dict(base_entry_metrics.get((ctx, resolved_model)) or {})
+                if not base:
+                    continue
+                base_trades = int(base.get("trades") or 0)
+                base_exp = float(base.get("expectancy_bps") or 0.0)
+                base_pf = float(base.get("profit_factor") or 0.0)
+                required_gain = max(0.50, abs(base_exp) * 0.15)
+                if (
+                    trades < int(min_context_trades)
+                    or trades < max(1, int(base_trades * 0.35))
+                    or exp < base_exp + required_gain
+                    or pf < max(1.08, base_pf)
+                ):
                     continue
                 min_stress_trades = max(12, int(min_context_trades) // 2)
                 if (
@@ -594,8 +637,8 @@ def build_adaptive_policy(
                 ):
                     continue
                 entry_candidates.setdefault(ctx, []).append({
-                    "entry_model": model or source_strategy,
-                    "entry_params": _entry_params_for_model(model or source_strategy, params),
+                    "entry_model": resolved_model,
+                    "entry_params": _entry_params_for_model(resolved_model, params),
                     "conditions": {condition_name: bucket},
                     "evidence_score": _evidence_score(met, stress, funnel) - 1.5,
                     "source_strategy": source_strategy,
