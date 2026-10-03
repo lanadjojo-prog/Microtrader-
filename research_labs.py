@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 
 from ctrader_client import CTraderClient
 from config import Settings
-from research_store import ResearchStore
+from research_store import RESEARCH_VALIDATION_VERSION, ResearchStore
 from forex_research_store import ForexResearchStore
 from strategy_lab import Candidate, aggregate_bars, candidate_signature, metrics, simulate
 from market_filters import active_session
@@ -33,11 +33,10 @@ class ResearchState:
 
 
 LABS = [
-    "market", "session", "regime", "high_frequency",
-    "walk_forward", "parameter_stability", "cost_stress",
-    "monte_carlo", "position_sizing", "compounding",
-    "leverage", "risk_of_ruin", "recovery",
-    "portfolio", "capital_allocation", "aggressive_growth", "master"
+    "walk_forward",
+    "parameter_stability",
+    "cost_stress",
+    "master",
 ]
 
 
@@ -384,12 +383,52 @@ class ResearchLabs:
 
     def _lab_master(self,candidates,bars):
         ranked=self._score_candidates(candidates,bars)
+        if not ranked:
+            return {
+                "validation_version": RESEARCH_VALIDATION_VERSION,
+                "passed": False,
+                "criteria": {},
+                "reason": "No validation trades available.",
+            }
+
+        best=ranked[0]
+        base=best["metrics"]
+        wf=((self._results.get("walk_forward") or {}).get("candidates") or [{}])[0]
+        stability=((self._results.get("parameter_stability") or {}).get("candidates") or [{}])[0]
+        costs=(self._results.get("cost_stress") or {}).get("cost_scenarios") or {}
+        cost15=costs.get("1.5") or {}
+
+        criteria={
+            "base_quality": (
+                float(base.get("expectancy_bps") or 0.0) > 0
+                and float(base.get("profit_factor") or 0.0) >= 1.15
+                and float(base.get("avg_trades_per_day") or 0.0)
+                    >= float(self.settings.strategy_min_trades_per_day)
+            ),
+            "walk_forward": int(wf.get("positive_windows") or 0) >= 3,
+            "parameter_stability": (
+                int(stability.get("neighbors_tested") or 0) >= 4
+                and float(stability.get("stability_ratio") or 0.0) >= 0.50
+            ),
+            "cost_stress_1_5x": (
+                float(cost15.get("expectancy_bps") or 0.0) > 0
+                and float(cost15.get("profit_factor") or 0.0) >= 1.0
+            ),
+        }
+        passed=all(criteria.values())
         return {
+            "validation_version": RESEARCH_VALIDATION_VERSION,
+            "passed": passed,
             "market":"forex",
             "data_source":"cTrader / Fusion demo",
-            "objective":"fast capital growth from a small forex account with explicit robustness and ruin controls",
-            "candidate_count":len(ranked),
-            "best_by_profit_factor":{"strategy":ranked[0]["strategy"],"params":ranked[0]["params"],"metrics":ranked[0]["metrics"]} if ranked else None,
-            "labs_completed":LABS[:-1],
-            "warning":"Research output only. Promotion to live trading remains disabled."
+            "candidate":{"strategy":best["strategy"],"params":best["params"]},
+            "metrics":base,
+            "criteria":criteria,
+            "checks":{
+                "walk_forward_positive_windows":int(wf.get("positive_windows") or 0),
+                "parameter_stability_ratio":float(stability.get("stability_ratio") or 0.0),
+                "cost_stress_1_5x":cost15,
+            },
+            "note":"Single robust validation gate; paper trading is the forward unseen test.",
         }
+
