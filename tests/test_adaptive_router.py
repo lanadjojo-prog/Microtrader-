@@ -106,7 +106,7 @@ class AdaptiveRouterTests(unittest.TestCase):
             },
             {
                 "strategy": "adaptive_router",
-                "params": {"_phase": "discovery"},
+                "params": {"_phase": "discovery", "_adaptive_research_mode": True},
                 "funnel_score": 55.0,
                 "adaptive_diagnostics": {
                     "context_version": ADAPTIVE_CONTEXT_VERSION,
