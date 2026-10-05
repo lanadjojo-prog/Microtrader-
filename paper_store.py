@@ -399,6 +399,28 @@ class PaperTradingStore:
             )
             await conn.commit()
 
+    async def portfolio_entries_today(self) -> int:
+        """Count today's completed + still-open paper entries across the portfolio."""
+        if not self.enabled:
+            return 0
+        async with connect_db(self.database_url) as conn:
+            cur = await conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*)
+                     FROM microtrader_paper_trades
+                     WHERE entry_time >= date_trunc('day', NOW())
+                       AND entry_time < date_trunc('day', NOW()) + INTERVAL '1 day')
+                    +
+                    (SELECT COUNT(*)
+                     FROM microtrader_paper_positions
+                     WHERE entry_time >= date_trunc('day', NOW())
+                       AND entry_time < date_trunc('day', NOW()) + INTERVAL '1 day')
+                """
+            )
+            row = await cur.fetchone()
+            return int((row or [0])[0] or 0)
+
     async def record_trade(
         self,
         *,
