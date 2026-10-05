@@ -365,12 +365,11 @@ class ForexResearchStore:
             cur = await conn.execute(
                 """
                 WITH ranked AS (
-                    SELECT signature, strategy, params, promoted, rejection_reasons,
-                           train, oos, stress_oos, positive_symbol_ratio,
-                           positive_symbols, symbol_count, per_symbol,
-                           family, funnel_stage, funnel_score,
-                       entry_model_breakdown, regime_breakdown, ensemble_policy,
-                       adaptive_diagnostics, tested_at,
+                    SELECT signature,
+                           promoted,
+                           funnel_score,
+                           (oos->>'expectancy_bps')::double precision AS expectancy_bps,
+                           tested_at,
                            ROW_NUMBER() OVER (
                                PARTITION BY COALESCE(family, strategy),
                                             COALESCE(funnel_stage, 'rejected')
@@ -380,20 +379,30 @@ class ForexResearchStore:
                                         tested_at DESC
                            ) AS family_stage_rank
                     FROM microtrader_forex_research_strategy_results
+                ),
+                picked AS (
+                    SELECT signature, promoted, funnel_score, expectancy_bps, tested_at
+                    FROM ranked
+                    WHERE promoted = TRUE OR family_stage_rank <= %s
+                    ORDER BY promoted DESC,
+                             funnel_score DESC NULLS LAST,
+                             expectancy_bps DESC NULLS LAST,
+                             tested_at DESC
+                    LIMIT %s
                 )
-                SELECT signature, strategy, params, promoted, rejection_reasons,
-                       train, oos, stress_oos, positive_symbol_ratio,
-                       positive_symbols, symbol_count, per_symbol,
-                       family, funnel_stage, funnel_score,
-                       entry_model_breakdown, regime_breakdown, ensemble_policy,
-                       adaptive_diagnostics, tested_at
-                FROM ranked
-                WHERE promoted = TRUE OR family_stage_rank <= %s
-                ORDER BY promoted DESC,
-                         funnel_score DESC NULLS LAST,
-                         (oos->>'expectancy_bps')::double precision DESC NULLS LAST,
-                         tested_at DESC
-                LIMIT %s
+                SELECT r.signature, r.strategy, r.params, r.promoted, r.rejection_reasons,
+                       r.train, r.oos, r.stress_oos, r.positive_symbol_ratio,
+                       r.positive_symbols, r.symbol_count, r.per_symbol,
+                       r.family, r.funnel_stage, r.funnel_score,
+                       r.entry_model_breakdown, r.regime_breakdown, r.ensemble_policy,
+                       r.adaptive_diagnostics, r.tested_at
+                FROM picked p
+                JOIN microtrader_forex_research_strategy_results r
+                  ON r.signature = p.signature
+                ORDER BY p.promoted DESC,
+                         p.funnel_score DESC NULLS LAST,
+                         p.expectancy_bps DESC NULLS LAST,
+                         p.tested_at DESC
                 """,
                 (max(1, int(per_family_stage)), max(1, int(limit))),
             )
