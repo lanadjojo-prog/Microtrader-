@@ -119,8 +119,7 @@ class ResearchStore:
         ) as conn:
             cur = await conn.execute(
                 """
-                SELECT DISTINCT ON (v.candidate_signature)
-                       v.candidate_signature,
+                SELECT v.candidate_signature,
                        v.strategy,
                        v.params,
                        v.summary,
@@ -131,16 +130,16 @@ class ResearchStore:
                        r.tested_at
                 FROM microtrader_research_validations v
                 JOIN microtrader_forex_research_strategy_results r
-                  ON r.strategy = v.strategy
-                 AND r.params = v.params
+                  ON r.signature = v.candidate_signature
                 WHERE v.status = 'completed'
+                  AND v.strategy = 'adaptive_router'
                   AND COALESCE(v.summary->>'validation_version', '') = %s
                   AND COALESCE((v.summary->>'passed')::boolean, FALSE) = TRUE
                   AND r.funnel_stage = 'promoted'
                   AND r.promoted = TRUE
                   AND COALESCE(r.params->>'_policy_version', '') = %s
                   AND COALESCE((r.oos->>'avg_trades_per_day')::double precision, 0) >= %s
-                ORDER BY v.candidate_signature, r.tested_at DESC
+                ORDER BY r.tested_at DESC
                 LIMIT %s
                 """,
                 (
