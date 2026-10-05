@@ -562,7 +562,7 @@ class StrategyLab:
             self.state.completed_at = datetime.now(timezone.utc).isoformat()
 
 
-RESEARCH_POLICY_VERSION = "forex-ctrader-v6-distilled-management-holdout20-oos20"
+RESEARCH_POLICY_VERSION = "forex-ctrader-v7-net-r-risk-holdout20-oos20"
 FINAL_HOLDOUT_FRACTION = 0.20
 DISCOVERY_SOURCE_BARS = 10000
 INCUBATOR_SOURCE_BARS = 20000
@@ -1153,6 +1153,40 @@ EXIT_PROFILES = {
 }
 
 
+def _max_loss_stop_price(
+    *,
+    entry: float,
+    risk_distance: float,
+    direction: int,
+    cost_bps: float,
+    max_loss_r: float = 1.0,
+) -> float:
+    """Price that limits NET modeled loss to max_loss_r after round-trip costs."""
+    if entry <= 0 or risk_distance <= 0 or direction not in (-1, 1):
+        return entry
+    risk_pct = risk_distance / entry
+    roundtrip_cost_pct = 2.0 * float(cost_bps) / 10_000.0
+    desired_net = -abs(float(max_loss_r)) * risk_pct
+    signed_gross = desired_net + roundtrip_cost_pct
+    return entry * (1.0 + signed_gross / float(direction))
+
+
+def _net_r_multiple(
+    *,
+    entry: float,
+    exit_price: float,
+    risk_distance: float,
+    direction: int,
+    cost_bps: float,
+) -> float:
+    if entry <= 0 or risk_distance <= 0 or direction not in (-1, 1):
+        return 0.0
+    gross = direction * ((float(exit_price) / entry) - 1.0)
+    net = gross - (2.0 * float(cost_bps) / 10_000.0)
+    risk_pct = risk_distance / entry
+    return net / risk_pct if risk_pct > 0 else 0.0
+
+
 def _exit_outcomes(
     trade: dict,
     bars: List[dict],
@@ -1175,9 +1209,12 @@ def _exit_outcomes(
         risk_distance = atr * float(profile["stop_atr"])
         if risk_distance <= 0:
             continue
-        stop = (
-            entry - risk_distance
-            if direction > 0 else entry + risk_distance
+        stop = _max_loss_stop_price(
+            entry=entry,
+            risk_distance=risk_distance,
+            direction=direction,
+            cost_bps=float(cost_bps),
+            max_loss_r=1.0,
         )
         target_r = float(profile["target_r"])
         target = (
@@ -2112,7 +2149,13 @@ def _simulate_regime_ensemble(
             continue
         risk = atr * float(p.get("stop_atr", 1.0))
         target_r = float(p.get("target_r", 2.0))
-        stop = entry - risk if direction > 0 else entry + risk
+        stop = _max_loss_stop_price(
+            entry=entry,
+            risk_distance=risk,
+            direction=direction,
+            cost_bps=float(cost_bps),
+            max_loss_r=1.0,
+        )
         target = entry + risk * target_r if direction > 0 else entry - risk * target_r
 
         e = i
@@ -2129,17 +2172,26 @@ def _simulate_regime_ensemble(
             if stop_hit:
                 exit_price = stop
                 x = j
-                r_mult = -1.0
+                r_mult = _net_r_multiple(
+                    entry=entry, exit_price=stop, risk_distance=risk,
+                    direction=direction, cost_bps=float(cost_bps),
+                )
                 exit_reason = "stop"
                 break
             if target_hit:
                 exit_price = target
                 x = j
-                r_mult = target_r
+                r_mult = _net_r_multiple(
+                    entry=entry, exit_price=target, risk_distance=risk,
+                    direction=direction, cost_bps=float(cost_bps),
+                )
                 exit_reason = "target"
                 break
         if r_mult is None:
-            r_mult = direction * (exit_price - entry) / risk if risk > 0 else 0.0
+            r_mult = _net_r_multiple(
+                entry=entry, exit_price=exit_price, risk_distance=risk,
+                direction=direction, cost_bps=float(cost_bps),
+            )
 
         trade = _trade(
             symbol, bars[e], bars[x], entry, exit_price, cost_bps,
@@ -2190,7 +2242,13 @@ def _simulate_adaptive_router(
             continue
         target_r = max(0.25, float(exit_profile.get("target_r", 2.0)))
         max_hold = max(2, int(exit_profile.get("max_hold", 24)))
-        stop = entry - risk if direction > 0 else entry + risk
+        stop = _max_loss_stop_price(
+            entry=entry,
+            risk_distance=risk,
+            direction=direction,
+            cost_bps=float(cost_bps),
+            max_loss_r=1.0,
+        )
         target = entry + risk * target_r if direction > 0 else entry - risk * target_r
 
         e = i
@@ -2215,13 +2273,19 @@ def _simulate_adaptive_router(
             if stop_hit:
                 exit_price = stop
                 x = j
-                r_mult = direction * (stop - entry) / risk if risk > 0 else -1.0
+                r_mult = _net_r_multiple(
+                    entry=entry, exit_price=stop, risk_distance=risk,
+                    direction=direction, cost_bps=float(cost_bps),
+                )
                 exit_reason = "management_stop" if protection_active else "stop"
                 break
             if target_hit:
                 exit_price = target
                 x = j
-                r_mult = target_r
+                r_mult = _net_r_multiple(
+                    entry=entry, exit_price=target, risk_distance=risk,
+                    direction=direction, cost_bps=float(cost_bps),
+                )
                 exit_reason = "target"
                 break
             if (
@@ -2243,7 +2307,10 @@ def _simulate_adaptive_router(
                     stop = max(stop, protected) if direction > 0 else min(stop, protected)
                     protection_active = True
         if r_mult is None:
-            r_mult = direction * (exit_price - entry) / risk if risk > 0 else 0.0
+            r_mult = _net_r_multiple(
+                entry=entry, exit_price=exit_price, risk_distance=risk,
+                direction=direction, cost_bps=float(cost_bps),
+            )
 
         trade = _trade(
             symbol, bars[e], bars[x], entry, exit_price, cost_bps,
@@ -2314,7 +2381,13 @@ def _simulate_asymmetric_breakout(candidate: Candidate, symbol: str, bars: List[
         if atr<=0: i+=1; continue
         risk=atr*float(p["stop_atr"])
         target_r=float(p["target_r"])
-        stop=entry-risk if direction>0 else entry+risk
+        stop=_max_loss_stop_price(
+            entry=entry,
+            risk_distance=risk,
+            direction=direction,
+            cost_bps=float(cost_bps),
+            max_loss_r=1.0,
+        )
         target=entry+risk*target_r if direction>0 else entry-risk*target_r
         e=i; x=min(e+int(p["max_hold"]),len(bars)-1); exit_price=float(bars[x]["o"]); r_mult=None
         for j in range(e,x+1):
@@ -2322,11 +2395,20 @@ def _simulate_asymmetric_breakout(candidate: Candidate, symbol: str, bars: List[
             stop_hit=(lo<=stop) if direction>0 else (hi>=stop)
             target_hit=(hi>=target) if direction>0 else (lo<=target)
             if stop_hit:
-                exit_price=stop; x=j; r_mult=-1.0; break
+                exit_price=stop; x=j; r_mult=_net_r_multiple(
+                    entry=entry, exit_price=stop, risk_distance=risk,
+                    direction=direction, cost_bps=float(cost_bps),
+                ); break
             if target_hit:
-                exit_price=target; x=j; r_mult=target_r; break
+                exit_price=target; x=j; r_mult=_net_r_multiple(
+                    entry=entry, exit_price=target, risk_distance=risk,
+                    direction=direction, cost_bps=float(cost_bps),
+                ); break
         if r_mult is None:
-            r_mult=direction*(exit_price-entry)/risk if risk>0 else 0.0
+            r_mult=_net_r_multiple(
+                entry=entry, exit_price=exit_price, risk_distance=risk,
+                direction=direction, cost_bps=float(cost_bps),
+            )
         trade=_trade(symbol,bars[e],bars[x],entry,exit_price,cost_bps,r_mult,direction=direction)
         trade["risk_distance"]=risk
         trades.append(trade); i=x+1
