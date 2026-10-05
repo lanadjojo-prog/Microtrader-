@@ -240,10 +240,27 @@ class StrategyLab:
                 raise RuntimeError("No usable cTrader forex bars returned for Research Lab")
 
             await self.store.init()
-            persisted = await self.store.load_research_memory(
-                per_family_stage=40,
-                limit=RESEARCH_MEMORY_LIMIT,
-            )
+            try:
+                persisted = await asyncio.wait_for(
+                    self.store.load_research_memory(
+                        per_family_stage=40,
+                        limit=RESEARCH_MEMORY_LIMIT,
+                    ),
+                    timeout=20.0,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                persisted = []
+                self.state.persistence_status = "delayed"
+                self.state.last_persist_error = (
+                    "resume memory unavailable: " + str(exc)
+                )[:300]
+                log.warning(
+                    "Strategy Lab resume memory unavailable; continuing without cached rows: %s",
+                    exc,
+                )
+
             # Old runs remain in the database for audit/history, but they must
             # never re-enter the active funnel after the policy change.
             persisted = [
@@ -256,8 +273,50 @@ class StrategyLab:
                 and str((row.get("params") or {}).get("_policy_version") or "") == RESEARCH_POLICY_VERSION
                 and str((row.get("adaptive_diagnostics") or {}).get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
             ]
-            persisted_signatures = await self.store.load_signatures()
-            persisted_state = await self.store.load_state()
+
+            try:
+                persisted_signatures = await asyncio.wait_for(
+                    self.store.load_signatures(),
+                    timeout=15.0,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                persisted_signatures = {
+                    str(row.get("signature"))
+                    for row in persisted
+                    if row.get("signature")
+                }
+                self.state.persistence_status = "delayed"
+                self.state.last_persist_error = (
+                    "resume signatures unavailable: " + str(exc)
+                )[:300]
+                log.warning(
+                    "Strategy Lab signature resume unavailable; using cached-memory signatures: %s",
+                    exc,
+                )
+
+            try:
+                persisted_state = await asyncio.wait_for(
+                    self.store.load_state(),
+                    timeout=10.0,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                persisted_state = {
+                    "generation": 0,
+                    "tested_total": len(persisted_signatures),
+                    "promoted_total": sum(1 for row in persisted if row.get("promoted")),
+                }
+                self.state.persistence_status = "delayed"
+                self.state.last_persist_error = (
+                    "resume state unavailable: " + str(exc)
+                )[:300]
+                log.warning(
+                    "Strategy Lab state resume unavailable; continuing from safe counters: %s",
+                    exc,
+                )
 
             seen = set(persisted_signatures)
             results: List[dict] = list(persisted)
