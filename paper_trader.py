@@ -484,9 +484,10 @@ class PaperTradingEngine:
         payload["strategy_preferred_trades_per_day"] = self.settings.strategy_preferred_trades_per_day
         payload["strategy_target_trades_per_day"] = self.settings.strategy_target_trades_per_day
         payload["portfolio_min_trades_per_day"] = self.settings.portfolio_min_trades_per_day
+        payload["portfolio_max_trades_per_day"] = self.settings.max_trades_per_day
         payload["frequency_policy"] = (
             "hard >=3/day per strategy; preference 5-10/day; "
-            "portfolio target >=10/day combined"
+            "portfolio target >=10/day combined; hard portfolio cap <=100 entries/day"
         )
         payload["paper_sources"] = ["validated_adaptive_router_only"]
         payload["paper_policy"] = (
@@ -761,6 +762,17 @@ class PaperTradingEngine:
                         await self.store.upsert_position(paper_id, pair, pos)
                         positions[pair] = pos
                 elif allow_entries:
+                    entries_today = await self.store.portfolio_entries_today()
+                    if entries_today >= int(self.settings.max_trades_per_day):
+                        log.info(
+                            "Paper portfolio daily entry cap reached: %s/%s",
+                            entries_today,
+                            int(self.settings.max_trades_per_day),
+                        )
+                        await self.store.set_cursor(paper_id, pair, str(bar["t"]))
+                        cursors[pair] = str(bar["t"])
+                        continue
+
                     decision = _causal_close_entry(
                         strategy,
                         params,
