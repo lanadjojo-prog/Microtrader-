@@ -471,6 +471,12 @@ def build_adaptive_policy(
         "entry_rejected_stress": 0,
         "entry_eligible": 0,
         "entry_missing_exit": 0,
+        "exit_seen": 0,
+        "exit_rejected_sample": 0,
+        "exit_rejected_edge": 0,
+        "exit_rejected_stress": 0,
+        "exit_eligible": 0,
+        "eligible_entry_examples": [],
     }
 
     for row in results:
@@ -523,6 +529,18 @@ def build_adaptive_policy(
                 continue
             filter_diagnostics["entry_eligible"] += 1
             resolved_model = model or source_strategy
+            if len(filter_diagnostics["eligible_entry_examples"]) < 5:
+                filter_diagnostics["eligible_entry_examples"].append({
+                    "context": ctx,
+                    "model": resolved_model,
+                    "source_strategy": source_strategy,
+                    "trades": trades,
+                    "expectancy_bps": round(exp, 4),
+                    "profit_factor": round(pf, 4),
+                    "stress_trades": stress_trades,
+                    "stress_expectancy_bps": round(stress_exp, 4),
+                    "stress_profit_factor": round(stress_pf, 4),
+                })
             base_entry_metrics[(ctx, resolved_model)] = {
                 "trades": trades,
                 "expectancy_bps": exp,
@@ -632,7 +650,12 @@ def build_adaptive_policy(
             stress_trades = int(stress.get("trades") or 0)
             stress_exp = float(stress.get("expectancy_bps") or 0.0)
             stress_pf = float(stress.get("profit_factor") or 0.0)
-            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.05:
+            filter_diagnostics["exit_seen"] += 1
+            if trades < int(min_context_trades):
+                filter_diagnostics["exit_rejected_sample"] += 1
+                continue
+            if exp <= 0.0 or pf < 1.05:
+                filter_diagnostics["exit_rejected_edge"] += 1
                 continue
             min_stress_trades = max(12, int(min_context_trades) // 2)
             if (
@@ -640,7 +663,9 @@ def build_adaptive_policy(
                 and stress_trades >= min_stress_trades
                 and (stress_exp <= 0.0 or stress_pf < 1.0)
             ):
+                filter_diagnostics["exit_rejected_stress"] += 1
                 continue
+            filter_diagnostics["exit_eligible"] += 1
             profile = dict(exit_profiles.get(exit_name) or {})
             if not profile:
                 continue
