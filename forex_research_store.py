@@ -370,9 +370,11 @@ class ForexResearchStore:
                            funnel_score,
                            (oos->>'expectancy_bps')::double precision AS expectancy_bps,
                            tested_at,
+                           COALESCE((params->>'timeframe_min')::integer, 0) AS timeframe_min,
                            ROW_NUMBER() OVER (
                                PARTITION BY COALESCE(family, strategy),
-                                            COALESCE(funnel_stage, 'rejected')
+                                            COALESCE(funnel_stage, 'rejected'),
+                                            COALESCE((params->>'timeframe_min')::integer, 0)
                                ORDER BY promoted DESC,
                                         funnel_score DESC NULLS LAST,
                                         (oos->>'expectancy_bps')::double precision DESC NULLS LAST,
@@ -380,10 +382,29 @@ class ForexResearchStore:
                            ) AS family_stage_rank
                     FROM microtrader_forex_research_strategy_results
                 ),
-                picked AS (
-                    SELECT signature, promoted, funnel_score, expectancy_bps, tested_at
+                diverse AS (
+                    SELECT signature,
+                           promoted,
+                           funnel_score,
+                           expectancy_bps,
+                           tested_at,
+                           timeframe_min,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY timeframe_min
+                               ORDER BY promoted DESC,
+                                        funnel_score DESC NULLS LAST,
+                                        expectancy_bps DESC NULLS LAST,
+                                        tested_at DESC
+                           ) AS timeframe_rank
                     FROM ranked
                     WHERE promoted = TRUE OR family_stage_rank <= %s
+                ),
+                picked AS (
+                    SELECT signature, promoted, funnel_score, expectancy_bps, tested_at
+                    FROM diverse
+                    WHERE promoted = TRUE
+                       OR timeframe_min NOT IN (1, 5)
+                       OR timeframe_rank <= %s
                     ORDER BY promoted DESC,
                              funnel_score DESC NULLS LAST,
                              expectancy_bps DESC NULLS LAST,
@@ -404,7 +425,11 @@ class ForexResearchStore:
                          p.expectancy_bps DESC NULLS LAST,
                          p.tested_at DESC
                 """,
-                (max(1, int(per_family_stage)), max(1, int(limit))),
+                (
+                    max(1, int(per_family_stage)),
+                    max(1, int(limit) // 2),
+                    max(1, int(limit)),
+                ),
             )
             return [dict(r) for r in await cur.fetchall()]
 
