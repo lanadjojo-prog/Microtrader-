@@ -382,34 +382,30 @@ class ForexResearchStore:
                            ) AS family_stage_rank
                     FROM microtrader_forex_research_strategy_results
                 ),
-                diverse AS (
-                    SELECT signature,
-                           promoted,
-                           funnel_score,
-                           expectancy_bps,
-                           tested_at,
-                           timeframe_min,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY timeframe_min
-                               ORDER BY promoted DESC,
-                                        funnel_score DESC NULLS LAST,
-                                        expectancy_bps DESC NULLS LAST,
-                                        tested_at DESC
-                           ) AS timeframe_rank
-                    FROM ranked
-                    WHERE promoted = TRUE OR family_stage_rank <= %s
-                ),
                 picked AS (
-                    SELECT signature, promoted, funnel_score, expectancy_bps, tested_at
-                    FROM diverse
-                    WHERE promoted = TRUE
-                       OR timeframe_min NOT IN (1, 5)
-                       OR timeframe_rank <= %s
-                    ORDER BY promoted DESC,
-                             funnel_score DESC NULLS LAST,
-                             expectancy_bps DESC NULLS LAST,
-                             tested_at DESC
-                    LIMIT %s
+                    (
+                        SELECT signature, promoted, funnel_score, expectancy_bps, tested_at
+                        FROM ranked
+                        WHERE timeframe_min = 1
+                          AND (promoted = TRUE OR family_stage_rank <= %s)
+                        ORDER BY promoted DESC,
+                                 funnel_score DESC NULLS LAST,
+                                 expectancy_bps DESC NULLS LAST,
+                                 tested_at DESC
+                        LIMIT %s
+                    )
+                    UNION ALL
+                    (
+                        SELECT signature, promoted, funnel_score, expectancy_bps, tested_at
+                        FROM ranked
+                        WHERE timeframe_min = 5
+                          AND (promoted = TRUE OR family_stage_rank <= %s)
+                        ORDER BY promoted DESC,
+                                 funnel_score DESC NULLS LAST,
+                                 expectancy_bps DESC NULLS LAST,
+                                 tested_at DESC
+                        LIMIT %s
+                    )
                 )
                 SELECT r.signature, r.strategy, r.params, r.promoted, r.rejection_reasons,
                        r.train, r.oos, r.stress_oos, r.positive_symbol_ratio,
@@ -428,7 +424,8 @@ class ForexResearchStore:
                 (
                     max(1, int(per_family_stage)),
                     max(1, int(limit) // 2),
-                    max(1, int(limit)),
+                    max(1, int(per_family_stage)),
+                    max(1, int(limit) - (int(limit) // 2)),
                 ),
             )
             return [dict(r) for r in await cur.fetchall()]
