@@ -289,7 +289,8 @@ class ResearchAgent:
         self._commit_decision(decision, hypotheses)
         log.info(
             "Research Agent cycle=%s mode=%s focus_families=%s focus_timeframes=%s "
-            "hypotheses=%s adaptive_contexts=%s adaptive_specialists=%s adaptive_evidence_rows=%s",
+            "hypotheses=%s adaptive_contexts=%s adaptive_specialists=%s adaptive_evidence_rows=%s "
+            "adaptive_filters=%s",
             self.state.cycles,
             mode,
             ",".join(focus_families) or "-",
@@ -298,6 +299,7 @@ class ResearchAgent:
             int(adaptive_policy.get("contexts") or 0),
             int(adaptive_policy.get("specialists") or 0),
             int(adaptive_policy.get("evidence_rows") or 0),
+            adaptive_policy.get("diagnostics") or {},
         )
         await self._persist_decision(decision, hypotheses)
 
