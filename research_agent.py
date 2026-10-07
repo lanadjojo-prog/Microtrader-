@@ -209,6 +209,10 @@ class ResearchAgent:
         adaptive_policy = {
             "version": ADAPTIVE_CONTEXT_VERSION,
             "timeframes": timeframe_policies,
+            "diagnostics": {
+                str(tf): dict(policy.get("diagnostics") or {})
+                for tf, policy in zip((1, 5), all_timeframe_policies)
+            },
             "contexts": sum(
                 int(policy.get("contexts") or 0)
                 for policy in timeframe_policies.values()
