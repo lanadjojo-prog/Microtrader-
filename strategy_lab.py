@@ -260,7 +260,7 @@ class StrategyLab:
                         per_family_stage=40,
                         limit=RESEARCH_MEMORY_LIMIT,
                     ),
-                    timeout=20.0,
+                    timeout=60.0,
                 )
             except asyncio.CancelledError:
                 raise
