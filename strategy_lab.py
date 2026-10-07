@@ -1617,6 +1617,19 @@ def evaluate_candidate(
     context_entry_exit_breakdown, exit_counterfactual_breakdown = (
         _exit_counterfactual_breakdown(oos_trades)
     )
+    # Distillation may learn from all data before the untouched final
+    # holdout. OOS metrics below remain the quality gate; these combined
+    # breakdowns are used only to establish that a context has enough sample.
+    research_trades = train_trades + oos_trades
+    research_context_entry_breakdown = _combo_breakdown(
+        research_trades, "context_key", "entry_model"
+    )
+    research_context_entry_management_breakdown, _ = _management_breakdown(
+        research_trades
+    )
+    research_context_entry_exit_breakdown, _ = _exit_counterfactual_breakdown(
+        research_trades
+    )
     stress_context_breakdown = _breakdown(stress_oos_trades, "context_key")
     stress_context_entry_breakdown = _combo_breakdown(
         stress_oos_trades, "context_key", "entry_model"
@@ -1848,6 +1861,7 @@ def evaluate_candidate(
             "entry_model_breakdown": entry_model_breakdown,
             "exit_model_breakdown": exit_model_breakdown,
             "context_entry_breakdown": context_entry_breakdown,
+            "research_context_entry_breakdown": research_context_entry_breakdown,
             "context_exit_breakdown": context_exit_breakdown,
             "time_breakdown": time_breakdown,
             "volume_breakdown": volume_breakdown,
@@ -1856,8 +1870,10 @@ def evaluate_candidate(
             "context_entry_time_breakdown": context_entry_time_breakdown,
             "context_entry_volume_breakdown": context_entry_volume_breakdown,
             "context_entry_management_breakdown": context_entry_management_breakdown,
+            "research_context_entry_management_breakdown": research_context_entry_management_breakdown,
             "management_model_breakdown": management_model_breakdown,
             "context_entry_exit_breakdown": context_entry_exit_breakdown,
+            "research_context_entry_exit_breakdown": research_context_entry_exit_breakdown,
             "exit_counterfactual_breakdown": exit_counterfactual_breakdown,
             "stress_context_breakdown": stress_context_breakdown,
             "stress_context_entry_breakdown": stress_context_entry_breakdown,
