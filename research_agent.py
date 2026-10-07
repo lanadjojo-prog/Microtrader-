@@ -103,7 +103,7 @@ class ResearchAgent:
     async def cycle(self):
         self.state.stage = "analyzing"
         results = [
-            r for r in self.lab.results()
+            r for r in self.lab.analysis_results()
             if (r.get("params") or {}).get("_phase") in {"discovery", "incubator"}
         ]
 
