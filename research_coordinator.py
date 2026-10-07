@@ -78,7 +78,7 @@ class ResearchCoordinator:
 
     def _best_promising(self):
         rows = []
-        for row in self.lab.results():
+        for row in self.lab.analysis_results():
             if str(row.get("strategy") or "") != "adaptive_router":
                 continue
             if row.get("funnel_stage") != "promoted" or not bool(row.get("promoted")):
