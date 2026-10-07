@@ -76,6 +76,7 @@ class StrategyLab:
         self.state = LabState()
         self._task: Optional[asyncio.Task] = None
         self._results: List[dict] = []
+        self._analysis_results: List[dict] = []
         self._recent_results = deque(maxlen=100)
         self._summary: dict = {}
         self._agent_focus: dict = {
@@ -116,7 +117,12 @@ class StrategyLab:
         return payload
 
     def results(self) -> List[dict]:
+        """Small dashboard-facing result set."""
         return list(self._results)
+
+    def analysis_results(self) -> List[dict]:
+        """Bounded but diverse research memory for agents and validation."""
+        return list(self._analysis_results)
 
     def recent_results(self) -> List[dict]:
         """Unranked recent observations for the critic, avoiding survivor bias."""
@@ -151,6 +157,7 @@ class StrategyLab:
             target_promoted=self.settings.lab_target_promoted,
         )
         self._results = []
+        self._analysis_results = []
         self._summary = {}
         self._pause_event.set()
         if not self._persist_task or self._persist_task.done():
@@ -336,7 +343,12 @@ class StrategyLab:
                 len(seen),
             )
             self.state.promoted_total = len(promoted)
-            self._results = list(results)
+            self._analysis_results = list(results)
+            self._results = prune_research_results(
+                results,
+                limit=DASHBOARD_RESULT_LIMIT,
+                per_family_stage=30,
+            )
             log.info(
                 "Strategy Lab resume: loaded_results=%s loaded_signatures=%s generation=%s tested_total=%s promoted_total=%s",
                 len(results), len(seen), self.state.generation, self.state.tested_total, self.state.promoted_total
@@ -479,6 +491,7 @@ class StrategyLab:
                         ),
                         reverse=True,
                     )
+                    self._analysis_results = list(results)
                     self._results = prune_research_results(
                         results,
                         limit=DASHBOARD_RESULT_LIMIT,
@@ -1051,7 +1064,7 @@ def prune_research_results(
     limit: int,
     per_family_stage: int,
 ) -> List[dict]:
-    """Keep a bounded, diverse in-memory research set."""
+    """Keep a bounded, diverse research set without starving a timeframe."""
     stage_rank = {"promoted": 4, "deep_search": 3, "incubator": 2, "rejected": 1}
     ordered = sorted(
         rows,
@@ -1064,13 +1077,41 @@ def prune_research_results(
         ),
         reverse=True,
     )
-    counts: Dict[tuple[str, str], int] = {}
+    counts: Dict[tuple[str, str, int], int] = {}
+    timeframe_counts = {1: 0, 5: 0}
+    timeframe_quota = {1: max(1, limit // 2), 5: max(1, limit - (limit // 2))}
     kept: List[dict] = []
-    for row in ordered:
-        key = (
+    kept_ids: set[int] = set()
+
+    def bucket(row: dict) -> tuple[str, str, int]:
+        return (
             str(row.get("family") or row.get("strategy") or "unknown"),
             str(row.get("funnel_stage") or "rejected"),
+            int((row.get("params") or {}).get("timeframe_min") or 0),
         )
+
+    # First pass reserves capacity for both supported timeframes.
+    for row in ordered:
+        key = bucket(row)
+        tf = key[2]
+        cap = limit if bool(row.get("promoted")) else per_family_stage
+        if counts.get(key, 0) >= cap:
+            continue
+        if tf in timeframe_quota and timeframe_counts[tf] >= timeframe_quota[tf]:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        if tf in timeframe_counts:
+            timeframe_counts[tf] += 1
+        kept.append(row)
+        kept_ids.add(id(row))
+        if len(kept) >= limit:
+            return kept
+
+    # Reallocate unused capacity to the best remaining rows.
+    for row in ordered:
+        if id(row) in kept_ids:
+            continue
+        key = bucket(row)
         cap = limit if bool(row.get("promoted")) else per_family_stage
         if counts.get(key, 0) >= cap:
             continue
