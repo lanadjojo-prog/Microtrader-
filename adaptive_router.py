@@ -490,6 +490,9 @@ def build_adaptive_policy(
         if str(diag.get("context_version") or "") != ADAPTIVE_CONTEXT_VERSION:
             continue
         entry_breakdown = dict(diag.get("context_entry_breakdown") or {})
+        research_entry = dict(
+            diag.get("research_context_entry_breakdown") or entry_breakdown
+        )
         stress_entry = dict(diag.get("stress_context_entry_breakdown") or {})
         if entry_breakdown:
             evidence_rows += 1
@@ -506,7 +509,9 @@ def build_adaptive_policy(
                 continue
             met = dict(met or {})
             stress = dict(stress_entry.get(combo) or {})
-            trades = int(met.get("trades") or 0)
+            sample = dict(research_entry.get(combo) or met)
+            trades = int(sample.get("trades") or 0)
+            oos_trades = int(met.get("trades") or 0)
             exp = float(met.get("expectancy_bps") or 0.0)
             pf = float(met.get("profit_factor") or 0.0)
             stress_exp = float(stress.get("expectancy_bps") or 0.0)
@@ -563,6 +568,10 @@ def build_adaptive_policy(
             if source_strategy == "adaptive_router"
             else dict(diag.get("context_entry_management_breakdown") or {})
         )
+        research_management = dict(
+            diag.get("research_context_entry_management_breakdown")
+            or management_breakdown
+        )
         stress_management = dict(
             diag.get("stress_context_entry_management_breakdown") or {}
         )
@@ -585,7 +594,8 @@ def build_adaptive_policy(
                 continue
             met = dict(met or {})
             stress = dict(stress_management.get(combo) or {})
-            trades = int(met.get("trades") or 0)
+            sample = dict(research_management.get(combo) or met)
+            trades = int(sample.get("trades") or 0)
             exp = float(met.get("expectancy_bps") or 0.0)
             pf = float(met.get("profit_factor") or 0.0)
             stress_trades = int(stress.get("trades") or 0)
@@ -630,6 +640,9 @@ def build_adaptive_policy(
             if source_strategy == "adaptive_router"
             else dict(diag.get("context_entry_exit_breakdown") or {})
         )
+        research_exit = dict(
+            diag.get("research_context_entry_exit_breakdown") or exit_breakdown
+        )
         stress_exit = dict(
             diag.get("stress_context_entry_exit_breakdown") or {}
         )
@@ -644,7 +657,8 @@ def build_adaptive_policy(
                 continue
             met = dict(met or {})
             stress = dict(stress_exit.get(combo) or {})
-            trades = int(met.get("trades") or 0)
+            sample = dict(research_exit.get(combo) or met)
+            trades = int(sample.get("trades") or 0)
             exp = float(met.get("expectancy_bps") or 0.0)
             pf = float(met.get("profit_factor") or 0.0)
             stress_trades = int(stress.get("trades") or 0)
