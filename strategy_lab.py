@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import mean, pstdev
@@ -74,6 +76,7 @@ class StrategyLab:
         self.state = LabState()
         self._task: Optional[asyncio.Task] = None
         self._results: List[dict] = []
+        self._recent_results = deque(maxlen=100)
         self._summary: dict = {}
         self._agent_focus: dict = {
             "families": [],
@@ -114,6 +117,10 @@ class StrategyLab:
 
     def results(self) -> List[dict]:
         return list(self._results)
+
+    def recent_results(self) -> List[dict]:
+        """Unranked recent observations for the critic, avoiding survivor bias."""
+        return list(self._recent_results)
 
     def set_agent_focus(
         self,
@@ -362,7 +369,7 @@ class StrategyLab:
                         "Strategy Lab generation exhausted: generation=%s; advancing",
                         self.state.generation,
                     )
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(30.0)
                     continue
                 for candidate in batch:
                     seen.add(candidate_signature(candidate))
@@ -436,11 +443,13 @@ class StrategyLab:
                     self.state.last_progress_at = self.state.last_completed_at
                     self.state.current_symbol = ""
                     log.info(
-                        "Strategy Lab candidate complete: strategy=%s phase=%s seconds=%.2f funnel_stage=%s score=%s pf=%s exp_bps=%s",
+                        "Strategy Lab candidate complete: strategy=%s phase=%s seconds=%.2f funnel_stage=%s score=%s pf=%s exp_bps=%s oos_trades=%s",
                         candidate.strategy, candidate_phase, elapsed, result.get("funnel_stage"),
                         result.get("funnel_score"), (result.get("oos") or {}).get("profit_factor"),
-                        (result.get("oos") or {}).get("expectancy_bps")
+                        (result.get("oos") or {}).get("expectancy_bps"),
+                        (result.get("oos") or {}).get("trades", 0)
                     )
+                    self._recent_results.append(result)
                     results.append(result)
                     results = prune_research_results(
                         results,
@@ -954,8 +963,12 @@ def choose_batch(
 
     # No promising parent left: broaden Discovery deterministically.
     g = max(1, generation)
-    epoch = max(0, (g - 1) // 6)
-    wave = 1 + ((g - 1) % 6)
+    # Search within plausible intraday ranges, even after thousands of cycles.
+    # Unbounded epoch growth made thresholds unreachable and 5m warmups
+    # longer than the OOS sample. Seeded jitter explores without that drift.
+    rng = random.Random(g)
+    epoch = rng.randrange(9)
+    wave = rng.randrange(1, 7)
     broad: List[Candidate] = []
     for tf in (1, 5):
         templates = [
@@ -1001,6 +1014,13 @@ def choose_batch(
                 "max_hold": 30 + 5*wave + 2*epoch}),
         ]
         for candidate in templates:
+            varied = dict(candidate.params)
+            for key, value in list(varied.items()):
+                if key in {"timeframe_min", "target_r"} or not isinstance(value, (int, float)):
+                    continue
+                value2 = value * rng.uniform(0.80, 1.20)
+                varied[key] = max(1, round(value2)) if isinstance(value, int) else round(value2, 4)
+            candidate = Candidate(candidate.strategy, varied)
             candidate = Candidate(candidate.strategy, {
                 **candidate.params,
                 "_policy_version": RESEARCH_POLICY_VERSION,
@@ -1033,6 +1053,8 @@ def prune_research_results(
         rows,
         key=lambda row: (
             stage_rank.get(str(row.get("funnel_stage") or "rejected"), 0),
+            bool((row.get("adaptive_diagnostics") or {}).get("context_entry_breakdown")),
+            int((row.get("oos") or {}).get("trades") or 0) > 0,
             float(row.get("funnel_score") or 0),
             float((row.get("oos") or {}).get("expectancy_bps") or 0),
         ),

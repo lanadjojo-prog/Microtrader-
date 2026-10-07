@@ -11,6 +11,7 @@ from typing import Optional
 
 import psycopg
 
+from research_critic import review_research
 from config import Settings
 from strategy_lab import StrategyLab
 from adaptive_router import ADAPTIVE_CONTEXT_VERSION, build_adaptive_policy
@@ -103,7 +104,7 @@ class ResearchAgent:
         self.state.stage = "analyzing"
         results = [
             r for r in self.lab.results()
-            if (r.get("params") or {}).get("_phase") in {"discovery", "incubator", "deep_search"}
+            if (r.get("params") or {}).get("_phase") in {"discovery", "incubator"}
         ]
 
         if not results:
@@ -190,6 +191,7 @@ class ResearchAgent:
         # must never become a 1m route merely because the regime/session label
         # happens to match.
         timeframe_policies = {}
+        all_timeframe_policies = []
         for tf in (1, 5):
             tf_results = [
                 row for row in results
@@ -200,6 +202,7 @@ class ResearchAgent:
                 min_context_trades=30,
                 max_entries_per_context=2,
             )
+            all_timeframe_policies.append(tf_policy)
             if tf_policy.get("routes"):
                 timeframe_policies[str(tf)] = tf_policy
 
@@ -216,7 +219,7 @@ class ResearchAgent:
             ),
             "evidence_rows": sum(
                 int(policy.get("evidence_rows") or 0)
-                for policy in timeframe_policies.values()
+                for policy in all_timeframe_policies
             ),
             "final_holdout_excluded": True,
         }
@@ -240,7 +243,21 @@ class ResearchAgent:
                 ),
             })
 
+        critic = review_research(results, self.lab.recent_results(), route_count=route_count)
+        if critic["steering"] == "bounded_exploration":
+            mode = "explore"
+            reason = critic["message"]
+            focus_families = []
+            focus_timeframes = [1, 5]
+        elif critic["hypotheses"]:
+            focus_families = list(dict.fromkeys(h["family"] for h in critic["hypotheses"]))[:self.settings.research_agent_focus_families]
+            reason = critic["message"]
+        hypotheses = critic["hypotheses"] + hypotheses
+        log.info("Research Critic status=%s recent=%s zero_trade=%s evidence_rows=%s routes=%s hypotheses=%s",
+                 critic["status"], critic["recent_sample_size"], critic["recent_zero_trade_results"],
+                 critic["context_evidence_rows"], route_count, len(critic["hypotheses"]))
         decision = {
+            "critic": critic,
             "action": "steer_strategy_funnel",
             "mode": mode,
             "reason": reason,
