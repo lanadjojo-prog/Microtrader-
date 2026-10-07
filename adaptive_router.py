@@ -464,6 +464,14 @@ def build_adaptive_policy(
     management_candidates: Dict[tuple[str, str], List[dict]] = {}
     base_entry_metrics: Dict[tuple[str, str], dict] = {}
     evidence_rows = 0
+    filter_diagnostics = {
+        "entry_contexts_seen": 0,
+        "entry_rejected_sample": 0,
+        "entry_rejected_edge": 0,
+        "entry_rejected_stress": 0,
+        "entry_eligible": 0,
+        "entry_missing_exit": 0,
+    }
 
     for row in results:
         # The adaptive policy is a research artifact. Never let final deep-search
@@ -498,7 +506,12 @@ def build_adaptive_policy(
             stress_exp = float(stress.get("expectancy_bps") or 0.0)
             stress_pf = float(stress.get("profit_factor") or 0.0)
             stress_trades = int(stress.get("trades") or 0)
-            if trades < int(min_context_trades) or exp <= 0.0 or pf < 1.05:
+            filter_diagnostics["entry_contexts_seen"] += 1
+            if trades < int(min_context_trades):
+                filter_diagnostics["entry_rejected_sample"] += 1
+                continue
+            if exp <= 0.0 or pf < 1.05:
+                filter_diagnostics["entry_rejected_edge"] += 1
                 continue
             min_stress_trades = max(12, int(min_context_trades) // 2)
             if (
@@ -506,7 +519,9 @@ def build_adaptive_policy(
                 and stress_trades >= min_stress_trades
                 and (stress_exp <= 0.0 or stress_pf < 1.0)
             ):
+                filter_diagnostics["entry_rejected_stress"] += 1
                 continue
+            filter_diagnostics["entry_eligible"] += 1
             resolved_model = model or source_strategy
             base_entry_metrics[(ctx, resolved_model)] = {
                 "trades": trades,
@@ -733,6 +748,7 @@ def build_adaptive_policy(
                 reverse=True,
             )
             if not exit_rows:
+                filter_diagnostics["entry_missing_exit"] += 1
                 continue
             row = dict(row)
             row["management_profile"] = (
@@ -759,6 +775,7 @@ def build_adaptive_policy(
         "evidence_rows": evidence_rows,
         "contexts": len(routes),
         "specialists": total_specialists,
+        "diagnostics": filter_diagnostics,
         "min_context_trades": int(min_context_trades),
         "max_entries_per_context": int(max_entries_per_context),
         "evidence_phases": ["discovery", "incubator"],
