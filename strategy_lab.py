@@ -834,24 +834,6 @@ def choose_batch(
             focus_timeframes=focus_timeframes,
         )
 
-    pending_discovery = [
-        candidate for candidate in discovery_candidates()
-        if candidate_signature(candidate) not in seen
-    ]
-    if pending_discovery:
-        pending_discovery.sort(
-            key=lambda candidate: _candidate_priority(
-                candidate, focus_families, focus_timeframes
-            ),
-            reverse=True,
-        )
-        return _round_robin_candidates(
-            pending_discovery,
-            batch_size=batch_size,
-            focus_families=focus_families,
-            focus_timeframes=focus_timeframes,
-        )
-
     # Once the research agent has enough context-labelled evidence, inject one
     # data-driven adaptive-router candidate per active timeframe. The complete
     # specialist policy is part of the signature, so unchanged policy is never
@@ -892,6 +874,28 @@ def choose_batch(
                 adaptive_candidates.append(candidate)
         if adaptive_candidates:
             return adaptive_candidates[:batch_size]
+
+    # Only continue broad standalone discovery when there is no new
+    # evidence-backed adaptive router waiting to be evaluated. This prevents
+    # the final adaptive strategy from being starved by an effectively endless
+    # stream of lower-priority standalone candidates.
+    pending_discovery = [
+        candidate for candidate in discovery_candidates()
+        if candidate_signature(candidate) not in seen
+    ]
+    if pending_discovery:
+        pending_discovery.sort(
+            key=lambda candidate: _candidate_priority(
+                candidate, focus_families, focus_timeframes
+            ),
+            reverse=True,
+        )
+        return _round_robin_candidates(
+            pending_discovery,
+            batch_size=batch_size,
+            focus_families=focus_families,
+            focus_timeframes=focus_timeframes,
+        )
 
     # A configuration that passed Incubator is frozen before Deep Search.
     # Deep Search never mutates parameters: it is the final holdout test.
