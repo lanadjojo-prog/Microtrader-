@@ -790,6 +790,9 @@ def _context_backfill_candidates(
             diagnostics.get("context_entry_breakdown")
             and diagnostics.get("context_entry_management_breakdown")
             and diagnostics.get("context_entry_exit_breakdown")
+            and diagnostics.get("research_context_entry_breakdown")
+            and diagnostics.get("research_context_entry_management_breakdown")
+            and diagnostics.get("research_context_entry_exit_breakdown")
             and str(diagnostics.get("context_version") or "") == ADAPTIVE_CONTEXT_VERSION
         ):
             continue
@@ -801,6 +804,10 @@ def _context_backfill_candidates(
         # Context backfill deliberately stays on pre-holdout discovery data.
         params["_phase"] = "discovery"
         params["_policy_version"] = RESEARCH_POLICY_VERSION
+        # Signature-only migration marker: forces one fresh evaluation for
+        # historical rows whose stored diagnostics predate the combined
+        # pre-holdout context sample. It does not change trading behavior.
+        params["_context_backfill_version"] = "preholdout-sample-v2"
         candidate = Candidate(strategy, params)
         signature = candidate_signature(candidate)
         if signature in seen or signature in local_seen:
