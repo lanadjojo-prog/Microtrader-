@@ -658,11 +658,16 @@ class PaperTradingEngine:
 
     async def _run(self) -> None:
         try:
-            await self.store.init()
-            await self.research_store.init()
-            await self.validation_store.init()
+            initialized = False
             while self.state.running:
                 try:
+                    if not initialized:
+                        self.state.stage = "initializing"
+                        self.state.message = "Connecting paper trading storage"
+                        await self.store.init()
+                        await self.research_store.init()
+                        await self.validation_store.init()
+                        initialized = True
                     strategies = await self._discover()
                     if not strategies:
                         self.state.stage = "waiting_promoted"
@@ -681,6 +686,7 @@ class PaperTradingEngine:
                             f"{self.settings.portfolio_min_trades_per_day:g} trades/day "
                             f"(not a hard per-strategy requirement)."
                         )
+                        strategy_errors = []
                         for row in strategies:
                             if not self.state.running:
                                 break
@@ -693,9 +699,13 @@ class PaperTradingEngine:
                                     allow_entries=(status == "active"),
                                 )
                             except Exception as exc:
-                                await self.store.set_error(str(row["paper_id"]), str(exc))
+                                strategy_errors.append(f"{row.get('paper_id')}: {exc}")
+                                try:
+                                    await self.store.set_error(str(row["paper_id"]), str(exc))
+                                except Exception:
+                                    log.exception("Could not persist paper strategy error")
                                 log.exception("Paper strategy failed: %s", row.get("paper_id"))
-                    self.state.last_error = None
+                    self.state.last_error = "; ".join(strategy_errors) if strategies and strategy_errors else None
                     self.state.last_cycle_at = datetime.now(timezone.utc).isoformat()
                 except Exception as exc:
                     self.state.stage = "error"
