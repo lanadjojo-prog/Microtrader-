@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -17,6 +18,7 @@ from precision_lab import PrecisionStrategyLab
 from precision_backtest import PRECISION_EVALUATION_POLICY_VERSION
 from paper_trader import PaperTradingEngine
 from oauth_store import CTraderTokenStore
+from db_connection import connect_db
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -37,6 +39,49 @@ precision_lab=PrecisionStrategyLab(settings,precision_ctrader)
 paper_engine=PaperTradingEngine(settings,paper_ctrader)
 token_store=CTraderTokenStore(settings.database_url)
 startup_warnings: list[str] = []
+storage_status = {"writable": None, "size_mb": None, "error": ""}
+storage_watch_task: asyncio.Task | None = None
+
+async def check_storage() -> bool:
+    if not settings.database_url:
+        storage_status.update(writable=False, size_mb=None, error="DATABASE_URL is not configured")
+        return False
+    try:
+        async with connect_db(settings.database_url, connect_timeout=5) as conn:
+            cur = await conn.execute("SELECT current_setting('transaction_read_only'), pg_database_size(current_database())")
+            row = await cur.fetchone()
+        writable = bool(row and row[0] == "off")
+        storage_status.update(
+            writable=writable,
+            size_mb=round(float(row[1]) / 1048576, 1) if row else None,
+            error="" if writable else "Supabase database is read-only (storage limit)"
+        )
+        return writable
+    except Exception as exc:
+        storage_status.update(writable=False, size_mb=None, error=f"Database unavailable: {type(exc).__name__}")
+        logging.getLogger("microtrader").warning("Storage probe failed: %s", exc)
+        return False
+
+async def storage_watch():
+    was_writable = storage_status["writable"] is True
+    while True:
+        await asyncio.sleep(300)
+        writable = await check_storage()
+        if not writable and was_writable:
+            logging.getLogger("microtrader").error("Storage became read-only; stopping research")
+            await paper_engine.stop()
+            await research_coordinator.stop()
+            await research_agent.stop()
+            await research_labs.stop()
+            await strategy_lab.stop()
+        if writable and not was_writable:
+            try:
+                await restore_ctrader()
+                await autostart()
+                startup_warnings.clear()
+            except Exception:
+                logging.getLogger("microtrader").exception("Storage restored, but worker restart failed")
+        was_writable = writable
 
 def runtime_invariant_errors() -> list[str]:
     errors = []
@@ -105,6 +150,8 @@ async def restore_ctrader():
     return True
 
 async def autostart():
+    if storage_status['writable'] is not True:
+        return
     if settings.lab_auto_start: await strategy_lab.start()
     if settings.research_agent_auto_start: await research_agent.start()
     if settings.research_auto_start: await research_coordinator.start()
@@ -132,23 +179,28 @@ async def autostart():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global storage_watch_task
     assert_runtime_invariants()
     startup_warnings.clear()
-    try:
-        await restore_ctrader()
-    except Exception:
-        # A temporarily unavailable database must not crash the whole web
-        # service: leave its health/dashboard online for troubleshooting.
-        startup_warnings.append("cTrader token restore failed; check server logs")
-        logging.getLogger("microtrader").exception("cTrader session restore failed")
-    try:
-        await autostart()
-    except Exception:
-        startup_warnings.append("Worker auto-start failed; check server logs")
-        logging.getLogger("microtrader").exception("Worker auto-start failed")
+    if await check_storage():
+        try:
+            await restore_ctrader()
+            await autostart()
+        except Exception:
+            startup_warnings.append("Worker startup failed; inspect server logs")
+            logging.getLogger("microtrader").exception("MicroTrader worker startup failed")
+    else:
+        startup_warnings.append("Workers paused: " + storage_status["error"])
+    storage_watch_task = asyncio.create_task(storage_watch(), name="microtrader-storage-watch")
     try:
         yield
     finally:
+        storage_watch_task.cancel()
+        try:
+            await storage_watch_task
+        except asyncio.CancelledError:
+            pass
+        storage_watch_task = None
         await paper_engine.stop(); await precision_lab.stop(); await forex_lab.stop()
         await research_coordinator.stop(); await research_agent.stop(); await research_labs.stop(); await strategy_lab.stop()
         await mark_ctrader.close(); await paper_ctrader.close(); await precision_ctrader.close(); await forex_ctrader.close()
@@ -158,8 +210,12 @@ app=FastAPI(title="ForexTrader Research",lifespan=lifespan)
 def auth(a):
     if not settings.dashboard_token or a!=f"Bearer {settings.dashboard_token}": raise HTTPException(401,"Unauthorized")
 
+async def require_storage_writable():
+    if not await check_storage():
+        raise HTTPException(503, detail=storage_status["error"])
+
 @app.get('/health')
-async def health(): return {'ok':not runtime_invariant_errors(),'mode':'forex-research-and-paper-only','runtime_invariant_errors':runtime_invariant_errors(),'live_trading_enabled':False,'research_market':'forex','research_data_source':'ctrader','research_running':strategy_lab.state.running,'research_stage':strategy_lab.state.stage,'research_validation_running':research_labs.state.running,'research_coordinator_mode':research_coordinator.state.mode,'research_agent_running':research_agent.state.running,'research_agent_stage':research_agent.state.stage,'forex_lab_running':forex_lab.state.running,'forex_stage':forex_lab.state.stage,'precision_lab_running':precision_lab.state.running,'precision_stage':precision_lab.state.stage,'paper_running':paper_engine.state.running,'paper_stage':paper_engine.state.stage,'ctrader_ready':ctrader.api_ready,'startup_warnings':list(startup_warnings),'research_error':bool(strategy_lab.state.last_error),'paper_error':bool(paper_engine.state.last_error)}
+async def health(): return {'ok':not runtime_invariant_errors(),'mode':'forex-research-and-paper-only','runtime_invariant_errors':runtime_invariant_errors(),'live_trading_enabled':False,'research_market':'forex','research_data_source':'ctrader','research_running':strategy_lab.state.running,'research_stage':strategy_lab.state.stage,'research_validation_running':research_labs.state.running,'research_coordinator_mode':research_coordinator.state.mode,'research_agent_running':research_agent.state.running,'research_agent_stage':research_agent.state.stage,'forex_lab_running':forex_lab.state.running,'forex_stage':forex_lab.state.stage,'precision_lab_running':precision_lab.state.running,'precision_stage':precision_lab.state.stage,'paper_running':paper_engine.state.running,'paper_stage':paper_engine.state.stage,'ctrader_ready':ctrader.api_ready,'startup_warnings':list(startup_warnings),'research_error':bool(strategy_lab.state.last_error),'paper_error':bool(paper_engine.state.last_error),'database_writable':storage_status['writable'],'database_size_mb':storage_status['size_mb'],'storage_error':storage_status['error']}
 @app.get('/api/research/status')
 async def research_status(authorization:str|None=Header(None)): auth(authorization); return {'strategy':strategy_lab.public_state(),'validation':research_labs.public_state(),'coordinator':research_coordinator.public_state(),'agent':research_agent.public_state()}
 @app.get('/api/research/results')
@@ -168,7 +224,7 @@ async def research_results(authorization:str|None=Header(None)):
     summary = await strategy_lab.store.funnel_summary(RESEARCH_POLICY_VERSION)
     return {'state':strategy_lab.public_state(),'results':strategy_lab.results(),'funnel_summary':summary,'validation':research_labs.public_state(),'coordinator':research_coordinator.public_state(),'agent':research_agent.public_state()}
 @app.post('/api/research/start')
-async def research_start(authorization:str|None=Header(None)): auth(authorization); await strategy_lab.start(); await research_agent.start(); await research_coordinator.start(); return {'strategy':strategy_lab.public_state(),'coordinator':research_coordinator.public_state(),'agent':research_agent.public_state()}
+async def research_start(authorization:str|None=Header(None)): auth(authorization); await require_storage_writable(); await strategy_lab.start(); await research_agent.start(); await research_coordinator.start(); return {'strategy':strategy_lab.public_state(),'coordinator':research_coordinator.public_state(),'agent':research_agent.public_state()}
 @app.post('/api/research/stop')
 async def research_stop(authorization:str|None=Header(None)): auth(authorization); await research_coordinator.stop(); await research_agent.stop(); await research_labs.stop(); await strategy_lab.stop(); return {'strategy':strategy_lab.public_state(),'coordinator':research_coordinator.public_state(),'agent':research_agent.public_state()}
 @app.get('/api/forex-lab/status')
@@ -234,7 +290,7 @@ async def paper_results(authorization:str|None=Header(None)):
     auth(authorization)
     return await _paper_results_with_marks()
 @app.post('/api/paper/start')
-async def paper_start(authorization:str|None=Header(None)): auth(authorization); await paper_engine.start(); return paper_engine.public_state()
+async def paper_start(authorization:str|None=Header(None)): auth(authorization); await require_storage_writable(); await paper_engine.start(); return paper_engine.public_state()
 @app.post('/api/paper/stop')
 async def paper_stop(authorization:str|None=Header(None)): auth(authorization); await paper_engine.stop(); return paper_engine.public_state()
 @app.get('/api/ctrader/oauth-url')
@@ -359,7 +415,7 @@ function setPaper(id){activePaper=id;localStorage.setItem('paperTab',id);documen
 function renderPaper(strats,daily,pos,trades){if(!strats.length){$('paper-tabs').innerHTML='';$('paper-content').innerHTML='<div class="empty">Nog geen paperstrategie actief of in review.</div>';return}if(!strats.some(x=>x.paper_id===activePaper))activePaper=strats[0].paper_id;$('paper-tabs').innerHTML=strats.map(s=>'<button class="paper-tab '+(s.paper_id===activePaper?'active':'')+'" data-id="'+s.paper_id+'" onclick="setPaper(\''+s.paper_id+'\')">'+codeName(s)+'</button>').join('');$('paper-content').innerHTML=strats.map(s=>'<div class="paper-wrap" data-id="'+s.paper_id+'" style="display:'+(s.paper_id===activePaper?'block':'none')+'"><div class="paper-pane">'+paperHeader(s,trades)+'<h3 style="margin-top:15px">Open trades</h3>'+openTable(s,pos)+'<h3 style="margin-top:15px">Gesloten trades</h3>'+closedTable(s,trades)+'<h3 style="margin-top:15px">Per dag</h3>'+dailyTable(s,daily)+'</div></div>').join('')}
 async function loadPaper(){let d=await req('/api/paper/results'),st=d.state||{},strats=(d.strategies||[]).filter(x=>['active','retiring','review_pause','ruined'].includes(String(x.status||''))),ids=new Set(strats.map(x=>x.paper_id)),daily=(d.daily||[]).filter(x=>ids.has(x.paper_id)),pos=(d.positions||[]).filter(x=>ids.has(x.paper_id)),trades=(d.trades||[]).filter(x=>ids.has(x.paper_id));$('paper-status').className='pill '+(st.running?'run':st.stage==='error'?'bad':'');$('paper-status').textContent=st.running?'ACTIEF':pretty(st.stage);$('paper-message').textContent=(st.message||'')+' · Verwacht '+Number(st.expected_portfolio_trades_per_day||0).toFixed(1)+' trades/dag';$('n-paper').textContent=strats.length;setStage('stage-paper',!!st.running,strats.length>0);$('criterion-frequency').textContent='≥'+Number(st.strategy_min_trades_per_day||3).toFixed(0)+' trades/dag per strategie; voorkeur '+Number(st.strategy_preferred_trades_per_day||5).toFixed(0)+'–'+Number(st.strategy_target_trades_per_day||10).toFixed(0)+'.';renderPaper(strats,daily,pos,trades)}
 async function refresh(){const a=await Promise.allSettled([loadResearch(),loadPaper()]);if(a[0].status==='rejected'){$('research-message').textContent='Onderzoeksdata tijdelijk niet beschikbaar: '+String(a[0].reason?.message||a[0].reason)}if(a[1].status==='rejected'){$('paper-message').textContent='Paperdata tijdelijk niet beschikbaar: '+String(a[1].reason?.message||a[1].reason)}}
-async function connect(){try{let h=await fetch('/health').then(r=>r.json());await req('/api/research/status');$('authbox').style.display='none';$('main').style.display='block';$('connection').className='pill '+(h.ctrader_ready?'good':'bad');$('connection').textContent='cTrader '+(h.ctrader_ready?'READY':'NIET READY')+' · LIVE UIT';await refresh()}catch(e){$('authbox').style.display='block';$('main').style.display='none';$('connection').className='pill bad';$('connection').textContent=String(e?.message||'').includes('401')?'Geen toegang':'Server/API fout';$('research-message').textContent=String(e?.message||e)}}
+async function connect(){try{let h=await fetch('/health').then(r=>r.json());await req('/api/research/status');$('authbox').style.display='none';$('main').style.display='block';$('connection').className='pill '+(h.ctrader_ready?'good':'bad');$('connection').textContent='cTrader '+(h.ctrader_ready?'READY':'NIET READY')+' · LIVE UIT';await refresh();if(!h.database_writable){$('research-message').textContent='ONDERZOEK GEPAUZEERD: '+(h.storage_error||'Database niet schrijfbaar')+' · '+String(h.database_size_mb||'?')+' MB gebruikt';$('paper-message').textContent='Papertrading wacht tot database weer schrijfbaar is.'}}catch(e){$('authbox').style.display='block';$('main').style.display='none';$('connection').className='pill bad';$('connection').textContent=String(e?.message||'').includes('401')?'Geen toegang':'Server/API fout';$('research-message').textContent=String(e?.message||e)}}
 async function authorize(){try{let d=await req('/api/ctrader/oauth-url');location.href=d.url}catch(e){alert(e.message)}}
 if(tok)connect();else $('authbox').style.display='block';setInterval(()=>{if(tok)refresh().catch(()=>{})},30000);
 </script>
