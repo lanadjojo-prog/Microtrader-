@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
@@ -142,65 +143,73 @@ class ForexResearchStore:
         """
         if not self.enabled:
             return
+        # Store all promising stages; sample terminal rejections deterministically.
+        # A full diagnostic JSON row for every losing test exhausted the Supabase
+        # storage quota. In-memory analysis still includes every tested candidate.
+        persist_detail = (
+            str(result.get("funnel_stage") or "") != "rejected"
+            or int(hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8], 16) % 20 == 0
+        )
         with psycopg.connect(self.database_url, connect_timeout=5) as conn:
-            conn.execute(
-                """
-                INSERT INTO microtrader_forex_research_strategy_results (
-                    signature, strategy, params, promoted, rejection_reasons,
-                    train, oos, stress_oos, positive_symbol_ratio,
-                    positive_symbols, symbol_count, per_symbol,
-                    family, funnel_stage, funnel_score,
-                    entry_model_breakdown, regime_breakdown, ensemble_policy,
-                    adaptive_diagnostics, tested_at
-                ) VALUES (
-                    %s, %s, %s::jsonb, %s, %s::jsonb,
-                    %s::jsonb, %s::jsonb, %s::jsonb, %s,
-                    %s, %s, %s::jsonb,
-                    %s, %s, %s,
-                    %s::jsonb, %s::jsonb, %s::jsonb,
-                    %s::jsonb, NOW()
+            if persist_detail:
+                conn.execute(
+                    """
+                    INSERT INTO microtrader_forex_research_strategy_results (
+                        signature, strategy, params, promoted, rejection_reasons,
+                        train, oos, stress_oos, positive_symbol_ratio,
+                        positive_symbols, symbol_count, per_symbol,
+                        family, funnel_stage, funnel_score,
+                        entry_model_breakdown, regime_breakdown, ensemble_policy,
+                        adaptive_diagnostics, tested_at
+                    ) VALUES (
+                        %s, %s, %s::jsonb, %s, %s::jsonb,
+                        %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                        %s, %s, %s::jsonb,
+                        %s, %s, %s,
+                        %s::jsonb, %s::jsonb, %s::jsonb,
+                        %s::jsonb, NOW()
+                    )
+                    ON CONFLICT (signature) DO UPDATE SET
+                        promoted = EXCLUDED.promoted,
+                        rejection_reasons = EXCLUDED.rejection_reasons,
+                        train = EXCLUDED.train,
+                        oos = EXCLUDED.oos,
+                        stress_oos = EXCLUDED.stress_oos,
+                        positive_symbol_ratio = EXCLUDED.positive_symbol_ratio,
+                        positive_symbols = EXCLUDED.positive_symbols,
+                        symbol_count = EXCLUDED.symbol_count,
+                        per_symbol = EXCLUDED.per_symbol,
+                        family = EXCLUDED.family,
+                        funnel_stage = EXCLUDED.funnel_stage,
+                        funnel_score = EXCLUDED.funnel_score,
+                        entry_model_breakdown = EXCLUDED.entry_model_breakdown,
+                        regime_breakdown = EXCLUDED.regime_breakdown,
+                        ensemble_policy = EXCLUDED.ensemble_policy,
+                        adaptive_diagnostics = EXCLUDED.adaptive_diagnostics,
+                        tested_at = NOW()
+                    """,
+                    (
+                        signature,
+                        result["strategy"],
+                        json.dumps(result["params"]),
+                        bool(result["promoted"]),
+                        json.dumps(result.get("rejection_reasons", [])),
+                        json.dumps(result.get("train", {})),
+                        json.dumps(result.get("oos", {})),
+                        json.dumps(result.get("stress_oos", {})),
+                        result.get("positive_symbol_ratio"),
+                        result.get("positive_symbols"),
+                        result.get("symbol_count"),
+                        json.dumps(result.get("per_symbol", {})),
+                        result.get("family"),
+                        result.get("funnel_stage"),
+                        result.get("funnel_score"),
+                        json.dumps(result.get("entry_model_breakdown", {})),
+                        json.dumps(result.get("regime_breakdown", {})),
+                        json.dumps(result.get("ensemble_policy", {})),
+                        json.dumps(result.get("adaptive_diagnostics", {})),
+                    ),
                 )
-                ON CONFLICT (signature) DO UPDATE SET
-                    promoted = EXCLUDED.promoted,
-                    rejection_reasons = EXCLUDED.rejection_reasons,
-                    train = EXCLUDED.train,
-                    oos = EXCLUDED.oos,
-                    stress_oos = EXCLUDED.stress_oos,
-                    positive_symbol_ratio = EXCLUDED.positive_symbol_ratio,
-                    positive_symbols = EXCLUDED.positive_symbols,
-                    symbol_count = EXCLUDED.symbol_count,
-                    per_symbol = EXCLUDED.per_symbol,
-                    family = EXCLUDED.family,
-                    funnel_stage = EXCLUDED.funnel_stage,
-                    funnel_score = EXCLUDED.funnel_score,
-                    entry_model_breakdown = EXCLUDED.entry_model_breakdown,
-                    regime_breakdown = EXCLUDED.regime_breakdown,
-                    ensemble_policy = EXCLUDED.ensemble_policy,
-                    adaptive_diagnostics = EXCLUDED.adaptive_diagnostics,
-                    tested_at = NOW()
-                """,
-                (
-                    signature,
-                    result["strategy"],
-                    json.dumps(result["params"]),
-                    bool(result["promoted"]),
-                    json.dumps(result.get("rejection_reasons", [])),
-                    json.dumps(result.get("train", {})),
-                    json.dumps(result.get("oos", {})),
-                    json.dumps(result.get("stress_oos", {})),
-                    result.get("positive_symbol_ratio"),
-                    result.get("positive_symbols"),
-                    result.get("symbol_count"),
-                    json.dumps(result.get("per_symbol", {})),
-                    result.get("family"),
-                    result.get("funnel_stage"),
-                    result.get("funnel_score"),
-                    json.dumps(result.get("entry_model_breakdown", {})),
-                    json.dumps(result.get("regime_breakdown", {})),
-                    json.dumps(result.get("ensemble_policy", {})),
-                    json.dumps(result.get("adaptive_diagnostics", {})),
-                ),
-            )
             conn.execute(
                 """
                 UPDATE microtrader_forex_research_strategy_state
