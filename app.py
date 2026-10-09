@@ -19,6 +19,7 @@ from precision_backtest import PRECISION_EVALUATION_POLICY_VERSION
 from paper_trader import PaperTradingEngine
 from oauth_store import CTraderTokenStore
 from db_connection import connect_db
+from storage_maintenance import reclaim_overquota_storage
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -41,6 +42,7 @@ token_store=CTraderTokenStore(settings.database_url)
 startup_warnings: list[str] = []
 storage_status = {"writable": None, "size_mb": None, "error": ""}
 storage_watch_task: asyncio.Task | None = None
+cleanup_status = {"attempted": False, "finished": False, "failed": False, "kept_rows": None}
 
 async def check_storage() -> bool:
     if not settings.database_url:
@@ -63,12 +65,45 @@ async def check_storage() -> bool:
         return False
 
 async def storage_watch():
+    """Retry connection and reclaim obsolete research if a quota-locked DB returns."""
     was_writable = storage_status["writable"] is True
+    next_cleanup_at = 0.0
+    first_check = True
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(15 if first_check else 300)
+        first_check = False
         writable = await check_storage()
+        size_mb = storage_status.get("size_mb")
+        now = asyncio.get_running_loop().time()
+
+        # Supabase quota lock: a maintenance session can be switched to RW.
+        # Reclaim with transactional TRUNCATE, keeping Adaptive Router and
+        # selected candidate evidence. Do NOT attempt anything while offline.
+        if (
+            not writable
+            and size_mb is not None
+            and size_mb > 475
+            and now >= next_cleanup_at
+        ):
+            next_cleanup_at = now + 3600
+            cleanup_status.update(attempted=True, failed=False)
+            try:
+                result = await reclaim_overquota_storage(settings.database_url)
+                cleanup_status.update(
+                    finished=bool(result.get("changed")),
+                    kept_rows=result.get("research_rows_retained"),
+                )
+            except Exception:
+                cleanup_status["failed"] = True
+                logging.getLogger("microtrader").exception(
+                    "Storage reclamation failed; candidate transaction rolled back"
+                )
+            writable = await check_storage()
+
         if not writable and was_writable:
-            logging.getLogger("microtrader").error("Storage became read-only; stopping research")
+            logging.getLogger("microtrader").error(
+                "Storage became unavailable or read-only; stopping research"
+            )
             await paper_engine.stop()
             await research_coordinator.stop()
             await research_agent.stop()
@@ -80,7 +115,9 @@ async def storage_watch():
                 await autostart()
                 startup_warnings.clear()
             except Exception:
-                logging.getLogger("microtrader").exception("Storage restored, but worker restart failed")
+                logging.getLogger("microtrader").exception(
+                    "Storage writable, but worker restart failed"
+                )
         was_writable = writable
 
 def runtime_invariant_errors() -> list[str]:
@@ -215,12 +252,14 @@ async def require_storage_writable():
         raise HTTPException(503, detail=storage_status["error"])
 
 @app.get('/health')
-async def health(): return {'ok':not runtime_invariant_errors() and storage_status['writable'] is True,'mode':'forex-research-and-paper-only','runtime_invariant_errors':runtime_invariant_errors(),'live_trading_enabled':False,'research_market':'forex','research_data_source':'ctrader','research_running':strategy_lab.state.running,'research_stage':strategy_lab.state.stage,'research_validation_running':research_labs.state.running,'research_coordinator_mode':research_coordinator.state.mode,'research_agent_running':research_agent.state.running,'research_agent_stage':research_agent.state.stage,'forex_lab_running':forex_lab.state.running,'forex_stage':forex_lab.state.stage,'precision_lab_running':precision_lab.state.running,'precision_stage':precision_lab.state.stage,'paper_running':paper_engine.state.running,'paper_stage':paper_engine.state.stage,'ctrader_ready':ctrader.api_ready,'startup_warnings':list(startup_warnings),'research_error':bool(strategy_lab.state.last_error),'paper_error':bool(paper_engine.state.last_error),'database_writable':storage_status['writable'],'database_size_mb':storage_status['size_mb'],'storage_error':storage_status['error']}
+async def health(): return {'ok':not runtime_invariant_errors() and storage_status['writable'] is True,'mode':'forex-research-and-paper-only','runtime_invariant_errors':runtime_invariant_errors(),'live_trading_enabled':False,'research_market':'forex','research_data_source':'ctrader','research_running':strategy_lab.state.running,'research_stage':strategy_lab.state.stage,'research_validation_running':research_labs.state.running,'research_coordinator_mode':research_coordinator.state.mode,'research_agent_running':research_agent.state.running,'research_agent_stage':research_agent.state.stage,'forex_lab_running':forex_lab.state.running,'forex_stage':forex_lab.state.stage,'precision_lab_running':precision_lab.state.running,'precision_stage':precision_lab.state.stage,'paper_running':paper_engine.state.running,'paper_stage':paper_engine.state.stage,'ctrader_ready':ctrader.api_ready,'startup_warnings':list(startup_warnings),'research_error':bool(strategy_lab.state.last_error),'paper_error':bool(paper_engine.state.last_error),'database_writable':storage_status['writable'],'database_size_mb':storage_status['size_mb'],'storage_error':storage_status['error'],'cleanup_attempted':cleanup_status['attempted'],'cleanup_finished':cleanup_status['finished'],'cleanup_failed':cleanup_status['failed'],'cleanup_kept_rows':cleanup_status['kept_rows']}
 @app.get('/api/research/status')
 async def research_status(authorization:str|None=Header(None)): auth(authorization); return {'strategy':strategy_lab.public_state(),'validation':research_labs.public_state(),'coordinator':research_coordinator.public_state(),'agent':research_agent.public_state()}
 @app.get('/api/research/results')
 async def research_results(authorization:str|None=Header(None)):
     auth(authorization)
+    if storage_status["writable"] is not True:
+        raise HTTPException(503, detail=storage_status["error"] or "Database not writable")
     summary = await strategy_lab.store.funnel_summary(RESEARCH_POLICY_VERSION)
     return {'state':strategy_lab.public_state(),'results':strategy_lab.results(),'funnel_summary':summary,'validation':research_labs.public_state(),'coordinator':research_coordinator.public_state(),'agent':research_agent.public_state()}
 @app.post('/api/research/start')
@@ -288,6 +327,8 @@ async def _paper_results_with_marks():
 @app.get('/api/paper/results')
 async def paper_results(authorization:str|None=Header(None)):
     auth(authorization)
+    if storage_status["writable"] is not True:
+        raise HTTPException(503, detail=storage_status["error"] or "Database not writable")
     return await _paper_results_with_marks()
 @app.post('/api/paper/start')
 async def paper_start(authorization:str|None=Header(None)): auth(authorization); await require_storage_writable(); await paper_engine.start(); return paper_engine.public_state()
