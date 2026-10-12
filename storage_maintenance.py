@@ -1,10 +1,11 @@
-"""One-time emergency recovery for the Supabase Free database-size limit.
+"""Emergency and proactive recovery for the Supabase Free database-size limit.
 
 Approved cleanup retains all Adaptive Router results, all promoted candidates,
 all incubating/discovery/validated candidates, and the strongest deep-search
 candidates. It never touches tokens, validation decisions, or paper trades.
 
-Only run when the database is over quota AND currently read-only. The recovery
+Run before reaching the quota (at 350 MB) as well as when quota-locked, provided
+PostgreSQL accepts connections. The recovery
 uses two PostgreSQL transactions and a session-local temporary staging table:
 either the research candidates are restored completely or the truncate rolls
 back. TRUNCATE physically reclaims space without requiring VACUUM FULL.
@@ -40,7 +41,7 @@ async def reclaim_overquota_storage(database_url: str) -> dict[str, Any]:
         )
         size_bytes, read_only = await cur.fetchone()
         size_mb = round(int(size_bytes) / 1048576, 1)
-        if size_mb <= 475:
+        if size_mb < 350:
             return {"changed": False, "size_before_mb": size_mb}
         if read_only == "on":
             raise RuntimeError("Unable to enable a read-write maintenance session")
