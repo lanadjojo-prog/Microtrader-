@@ -65,7 +65,7 @@ async def check_storage() -> bool:
         return False
 
 async def storage_watch():
-    """Retry connection and reclaim obsolete research if a quota-locked DB returns."""
+    """Monitor storage and reclaim obsolete research before hitting DB quota."""
     was_writable = storage_status["writable"] is True
     next_cleanup_at = 0.0
     first_check = True
@@ -76,16 +76,15 @@ async def storage_watch():
         size_mb = storage_status.get("size_mb")
         now = asyncio.get_running_loop().time()
 
-        # Supabase quota lock: a maintenance session can be switched to RW.
-        # Reclaim with transactional TRUNCATE, keeping Adaptive Router and
-        # selected candidate evidence. Do NOT attempt anything while offline.
+        # Prevent quota lock proactively: prune replaceable research at 350 MB.
+        # Maintain promoted/validated Adaptive Router evidence and all paper trades.
+        # Never attempt cleanup unless the database is accepting connections.
         if (
-            not writable
-            and size_mb is not None
-            and size_mb > 475
+            size_mb is not None
+            and size_mb >= 350
             and now >= next_cleanup_at
         ):
-            next_cleanup_at = now + 3600
+            next_cleanup_at = now + 900
             cleanup_status.update(attempted=True, failed=False)
             try:
                 result = await reclaim_overquota_storage(settings.database_url)
