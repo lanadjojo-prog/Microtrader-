@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from fastapi import FastAPI, Header, HTTPException
@@ -20,6 +21,7 @@ from paper_trader import PaperTradingEngine
 from oauth_store import CTraderTokenStore
 from db_connection import connect_db
 from storage_maintenance import reclaim_overquota_storage
+from desk_service import DeskService, desk_router
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -38,7 +40,8 @@ research_coordinator=ResearchCoordinator(strategy_lab,research_labs)
 forex_lab=ForexStrategyLab(settings,forex_ctrader)
 precision_lab=PrecisionStrategyLab(settings,precision_ctrader)
 paper_engine=PaperTradingEngine(settings,paper_ctrader)
-token_store=CTraderTokenStore(settings.database_url)
+token_store=CTraderTokenStore(os.getenv('DESK_DATABASE_URL','').strip() or settings.database_url)
+agent_desk=DeskService(settings,ctrader)
 startup_warnings: list[str] = []
 storage_status = {"writable": None, "size_mb": None, "error": ""}
 storage_watch_task: asyncio.Task | None = None
@@ -198,6 +201,10 @@ async def autostart():
     if precision_lab.state.running:
         await precision_lab.stop()
     if settings.paper_trading_auto_start: await paper_engine.start()
+    try:
+        await agent_desk.start()
+    except Exception:
+        logging.getLogger('microtrader').exception('Five-agent tester could not start')
     logging.getLogger("microtrader").info(
         "WORKERS research=%s agent=%s coordinator=%s forex=%s precision=%s paper=%s "
         "research_stage=%s forex_stage=%s precision_stage=%s paper_stage=%s",
@@ -227,6 +234,14 @@ async def lifespan(app: FastAPI):
             logging.getLogger("microtrader").exception("MicroTrader worker startup failed")
     else:
         startup_warnings.append("Workers paused: " + storage_status["error"])
+    # The new desk can use an independent ledger even if the legacy research
+    # database is unavailable. Do not reset or replace the old research database.
+    if agent_desk.database_url != settings.database_url:
+        try:
+            await restore_ctrader()
+            await agent_desk.start()
+        except Exception:
+            logging.getLogger('microtrader').exception('Independent agent desk startup failed')
     storage_watch_task = asyncio.create_task(storage_watch(), name="microtrader-storage-watch")
     try:
         yield
@@ -237,6 +252,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         storage_watch_task = None
+        await agent_desk.stop()
         await paper_engine.stop(); await precision_lab.stop(); await forex_lab.stop()
         await research_coordinator.stop(); await research_agent.stop(); await research_labs.stop(); await strategy_lab.stop()
         await mark_ctrader.close(); await paper_ctrader.close(); await precision_ctrader.close(); await forex_ctrader.close()
@@ -246,12 +262,14 @@ app=FastAPI(title="ForexTrader Research",lifespan=lifespan)
 def auth(a):
     if not settings.dashboard_token or a!=f"Bearer {settings.dashboard_token}": raise HTTPException(401,"Unauthorized")
 
+app.include_router(desk_router(agent_desk,auth))
+
 async def require_storage_writable():
     if not await check_storage():
         raise HTTPException(503, detail=storage_status["error"])
 
 @app.get('/health')
-async def health(): return {'ok':not runtime_invariant_errors() and storage_status['writable'] is True,'mode':'forex-research-and-paper-only','runtime_invariant_errors':runtime_invariant_errors(),'live_trading_enabled':False,'research_market':'forex','research_data_source':'ctrader','research_running':strategy_lab.state.running,'research_stage':strategy_lab.state.stage,'research_validation_running':research_labs.state.running,'research_coordinator_mode':research_coordinator.state.mode,'research_agent_running':research_agent.state.running,'research_agent_stage':research_agent.state.stage,'forex_lab_running':forex_lab.state.running,'forex_stage':forex_lab.state.stage,'precision_lab_running':precision_lab.state.running,'precision_stage':precision_lab.state.stage,'paper_running':paper_engine.state.running,'paper_stage':paper_engine.state.stage,'ctrader_ready':ctrader.api_ready,'startup_warnings':list(startup_warnings),'research_error':bool(strategy_lab.state.last_error),'paper_error':bool(paper_engine.state.last_error),'database_writable':storage_status['writable'],'database_size_mb':storage_status['size_mb'],'storage_error':storage_status['error'],'cleanup_attempted':cleanup_status['attempted'],'cleanup_finished':cleanup_status['finished'],'cleanup_failed':cleanup_status['failed'],'cleanup_kept_rows':cleanup_status['kept_rows']}
+async def health(): return {'ok':not runtime_invariant_errors() and storage_status['writable'] is True,'mode':'forex-research-and-paper-only','runtime_invariant_errors':runtime_invariant_errors(),'live_trading_enabled':False,'research_market':'forex','research_data_source':'ctrader','research_running':strategy_lab.state.running,'research_stage':strategy_lab.state.stage,'research_validation_running':research_labs.state.running,'research_coordinator_mode':research_coordinator.state.mode,'research_agent_running':research_agent.state.running,'research_agent_stage':research_agent.state.stage,'forex_lab_running':forex_lab.state.running,'forex_stage':forex_lab.state.stage,'precision_lab_running':precision_lab.state.running,'precision_stage':precision_lab.state.stage,'paper_running':paper_engine.state.running,'paper_stage':paper_engine.state.stage,'ctrader_ready':ctrader.api_ready,'startup_warnings':list(startup_warnings),'research_error':bool(strategy_lab.state.last_error),'paper_error':bool(paper_engine.state.last_error),'database_writable':storage_status['writable'],'database_size_mb':storage_status['size_mb'],'storage_error':storage_status['error'],'cleanup_attempted':cleanup_status['attempted'],'cleanup_finished':cleanup_status['finished'],'cleanup_failed':cleanup_status['failed'],'cleanup_kept_rows':cleanup_status['kept_rows'],'agent_desk':{'version':'desk-m1-m5-v1','phase':agent_desk.phase,'worker_running':bool(agent_desk.task and not agent_desk.task.done()),'llm_configured':agent_desk.agents.ready,'last_cycle':agent_desk.last_cycle}}
 @app.get('/api/research/status')
 async def research_status(authorization:str|None=Header(None)): auth(authorization); return {'strategy':strategy_lab.public_state(),'validation':research_labs.public_state(),'coordinator':research_coordinator.public_state(),'agent':research_agent.public_state()}
 @app.get('/api/research/results')
@@ -389,7 +407,7 @@ button,input{font:inherit;border:1px solid #39485b;border-radius:9px;padding:9px
 </style>
 </head>
 <body>
-<div class="top"><div><h1>ForexTrader</h1><div class="muted">Research → simpele regels → validation → paper</div></div><div class="row"><span id="connection" class="pill">offline</span><button onclick="authorize()">cTrader</button></div></div>
+<div class="top"><div><h1>ForexTrader</h1><div class="muted">Research → simpele regels → validation → paper</div></div><div class="row"><a href="/desk" style="color:#b6f673">5-agent trading desk →</a><span id="connection" class="pill">offline</span><button onclick="authorize()">cTrader</button></div></div>
 <div id="authbox" class="card"><b>Dashboard toegang</b><div class="row" style="margin-top:9px"><input id="token" type="password" placeholder="Dashboard token"><button onclick="saveToken()">Open</button></div></div>
 <div id="main" style="display:none">
 
@@ -460,3 +478,4 @@ async function authorize(){try{let d=await req('/api/ctrader/oauth-url');locatio
 if(tok)connect();else $('authbox').style.display='block';setInterval(()=>{if(tok)refresh().catch(()=>{})},30000);
 </script>
 </body></html>'''
+
